@@ -142,3 +142,18 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .nextbox .navs{display:flex;gap:8px;margin-top:8px}
 .keyrow{display:flex;gap:8px;margin-top:4px}.keyrow input{flex:1}
 .lowconf{color:var(--orange);font-size:13px;margin-top:4px}
+.dnote{margin-top:8px;cursor:default}
+.dnote.has{display:flex;gap:8px;align-items:flex-start;background:rgba(255,214,10,.14);border:1px solid rgba(255,214,10,.35);border-radius:10px;padding:8px 6px 8px 10px}
+.dnote .ni{font-size:16px;line-height:1.35}
+.dnote .ntext{flex:1;white-space:pre-wrap;font-size:15px;color:#ffe680;word-break:break-word}
+.dnote .icon{padding:0 6px;font-size:16px}
+.dnote.add .link{font-size:14px;color:var(--sub)}
+.dnote.editing textarea{min-height:76px;font-size:16px;margin-bottom:6px}
+.dnote .row,.nitem .row{display:flex;gap:8px}
+.dnote .row .btn,.nitem .row .btn{flex:1}
+.nitem{border-top:1px solid var(--sep);padding:10px 0}
+.nitem:first-child{border-top:0}
+.nhead{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:15px}
+.nitem .a{color:var(--sub);font-size:13px}
+.nitem .ntext{white-space:pre-wrap;font-size:14px;color:#ffe680;margin-top:4px}
+.nitem textarea{margin:6px 0;font-size:16px}

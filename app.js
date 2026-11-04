@@ -475,6 +475,108 @@ function renderDriver() {
   $('#driverSeg').innerHTML = settings.drivers.filter(d => d.name && d.address).map(d => `<button data-driver="${esc(d.name)}" class="${drv && d.name === drv.name ? 'on' : ''}">${esc(d.name)}</button>`).join('');
   $('#homeAddr').textContent = drv ? drv.address : '';
 }
+/* ---------------- Händler-Notizen (nur lokal auf diesem Gerät, nie im Netz) ---------------- */
+let notes = LS.get('tp_notes', {});   // { key: {id, key, name, strasse, plz, ort, placeId, text, updated, deleted} } – sync-fähig (Zeitstempel + Lösch-Markierung)
+const liveNotes = () => Object.values(notes).filter(n => !n.deleted);
+const delNote = key => { const n = notes[key]; if (n) { n.deleted = true; n.text = ''; n.updated = Date.now(); } };
+let noteEdit = null;                       // 'list|<id>' oder 'route|<i>'
+const saveNotes = () => LS.set('tp_notes', notes);
+const nName = x => toks(x).filter(t => !WEAK.has(t)).join(' ') || toks(x).join(' ');
+const nStreet = x => normAddr(expandStreet(x || '')).replace(/strasse/g, 'str');
+function dealerKey(s) { return [nName(s.kunde), nStreet(s.strasse), s.plz || normAddr(s.ort)].join('|'); }
+function findNote(s) {
+  if (!s) return null;
+  const k = dealerKey(s); if (notes[k] && !notes[k].deleted) return notes[k];
+  const pid = s.hours?.placeId;
+  if (pid) { const n = liveNotes().find(n => n.placeId && n.placeId === pid); if (n) return n; }
+  // gleicher Händler trotz kleiner OCR-Abweichungen: gleiche PLZ/Ort + Straße und ähnlicher Name
+  const st = nStreet(s.strasse), loc = s.plz || normAddr(s.ort);
+  return liveNotes().find(n => (n.plz || normAddr(n.ort)) === loc && st && (nStreet(n.strasse) === st || lev(nStreet(n.strasse), st) <= 1) && nameScore(s.kunde, { name: n.name }, s.ort) >= 0.6)
+    || liveNotes().find(n => (n.plz || normAddr(n.ort)) === loc && nName(n.name) && nName(n.name) === nName(s.kunde)) || null;
+}
+function saveNote(s, text) {
+  const ex = findNote(s); const key = ex?.key || dealerKey(s);
+  text = (text || '').replace(/\s+$/, '');
+  if (!text.trim()) { delNote(key); }
+  else notes[key] = { id: notes[key]?.id || ex?.id || uid() + uid(), key, name: s.kunde || ex?.name || '', strasse: s.strasse || ex?.strasse || '', plz: s.plz || ex?.plz || '', ort: s.ort || ex?.ort || '',
+    auftrag: s.auftrag || ex?.auftrag || '', placeId: s.hours?.placeId || ex?.placeId || '', text, updated: Date.now() };
+  saveNotes(); renderNotesList();
+}
+function noteHtml(s, id) {
+  const n = findNote(s);
+  if (noteEdit === id) return `<div class="dnote editing" data-note="${esc(id)}"><textarea data-act="note-text" rows="3" placeholder="z. B. Ansprechpartner, Zufahrt, Schlüsselabgabe …">${esc(n?.text || '')}</textarea>
+    <div class="row"><button class="btn small secondary" data-act="note-cancel">Abbrechen</button><button class="btn small" data-act="note-save">Speichern</button></div></div>`;
+  if (n) return `<div class="dnote has" data-note="${esc(id)}"><span class="ni">📝</span><div class="ntext">${esc(n.text)}</div><button class="icon" data-act="note-edit" aria-label="Notiz bearbeiten">✎</button></div>`;
+  return `<div class="dnote add" data-note="${esc(id)}"><button class="link" data-act="note-edit">📝 Notiz hinzufügen</button></div>`;
+}
+// Beim Neuzeichnen eine gerade bearbeitete Notiz nicht verlieren
+function keepNoteEditing(fn) {
+  const ta = document.activeElement?.matches?.('textarea[data-act=note-text]') ? document.activeElement : null;
+  const v = ta?.value, a = ta?.selectionStart, b = ta?.selectionEnd;
+  fn();
+  if (ta && noteEdit) { const n = document.querySelector(`[data-note="${CSS.escape(noteEdit)}"] textarea`); if (n) { n.value = v; n.focus(); try { n.setSelectionRange(a, b); } catch { } } }
+}
+function stopForNote(el) {
+  const box = el.closest('[data-note]'); if (!box) return null;
+  const [where, ref] = box.dataset.note.split('|');
+  const s = where === 'list' ? state.stops.find(x => x.id === ref) : state.result?.stops[+ref];
+  return s ? { s, id: box.dataset.note, box } : null;
+}
+function handleNoteClick(e) {
+  const act = e.target.closest('[data-act]')?.dataset.act; if (!act || !act.startsWith('note-')) return false;
+  const t = stopForNote(e.target); if (!t) return true;
+  if (act === 'note-edit') { noteEdit = t.id; rerenderNotes(); const ta = document.querySelector(`[data-note="${CSS.escape(t.id)}"] textarea`); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
+  else if (act === 'note-cancel') { noteEdit = null; rerenderNotes(); }
+  else if (act === 'note-save') { const ta = t.box.querySelector('textarea'); if (ta) saveNote(t.s, ta.value); noteEdit = null; rerenderNotes(); toast('Notiz gespeichert'); }
+  return true;
+}
+function handleNoteBlur(e) {
+  if (!e.target.matches('textarea[data-act=note-text]')) return;
+  if (e.relatedTarget?.dataset?.act === 'note-cancel') return;
+  const t = stopForNote(e.target); if (!t) return;
+  saveNote(t.s, e.target.value);
+  if (e.relatedTarget?.dataset?.act === 'note-save') return;   // Klick-Handler übernimmt
+  noteEdit = null; setTimeout(rerenderNotes, 0);
+}
+function rerenderNotes() { renderStops(); renderResult(); }
+function renderNotesList() {
+  const ul = $('#notesList'); if (!ul) return;
+  const list = liveNotes().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+  $('#notesCount').textContent = list.length ? `(${list.length})` : '';
+  if (!list.length) { ul.innerHTML = '<li class="empty">Noch keine Notizen. Notizen legst du direkt am Auftrag an.</li>'; return; }
+  ul.innerHTML = list.map(n => `<li class="nitem" data-key="${esc(n.key)}">
+    <div class="nhead"><b>${esc(n.name || 'Ohne Namen')}</b><span>${noteListEdit === n.key ? '' : `<button class="icon" data-act="nl-edit" aria-label="Bearbeiten">✎</button><button class="icon del" data-act="nl-del" aria-label="Löschen">✕</button>`}</span></div>
+    <div class="a">${esc([n.strasse, [n.plz, n.ort].filter(Boolean).join(' ')].filter(Boolean).join(', '))}</div>
+    ${noteListEdit === n.key ? `<textarea rows="3">${esc(n.text)}</textarea><div class="row"><button class="btn small secondary" data-act="nl-cancel">Abbrechen</button><button class="btn small" data-act="nl-save">Speichern</button></div>` : `<div class="ntext">${esc(n.text)}</div>`}
+  </li>`).join('');
+}
+let noteListEdit = null;
+function exportNotes() {
+  const data = { type: 'tourenplaner-notizen', version: 1, exported: new Date().toISOString(), notes: liveNotes() };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `tourenplaner-notizen-${new Date().toISOString().slice(0, 10)}.json`; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+async function importNotes(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    const list = Array.isArray(data) ? data : data.notes;
+    if (!Array.isArray(list)) throw new Error('Keine Notizen in der Datei');
+    let added = 0, updated = 0;
+    for (const n of list) {
+      if (!n || typeof n.text !== 'string' || !n.text.trim()) continue;
+      const stop = { kunde: n.name || '', strasse: n.strasse || '', plz: n.plz || '', ort: n.ort || '', hours: n.placeId ? { placeId: n.placeId } : null };
+      const ex = findNote(stop); const key = ex?.key || n.key || dealerKey(stop);
+      if (ex && (ex.updated || 0) >= (n.updated || 0)) continue;
+      notes[key] = { id: notes[key]?.id || n.id || uid() + uid(), key, name: stop.kunde, strasse: stop.strasse, plz: stop.plz, ort: stop.ort, auftrag: n.auftrag || '', placeId: n.placeId || '', text: n.text, updated: n.updated || Date.now() };
+      ex ? updated++ : added++;
+    }
+    saveNotes(); renderNotesList(); rerenderNotes();
+    toast(`Import: ${added} neu, ${updated} aktualisiert`);
+  } catch (e) { toast('Import fehlgeschlagen: ' + e.message, 5000); }
+}
+
 function renderStops() {
   const ul = $('#stopList'); const st = state.stops;
   $('#stopCount').textContent = st.length ? `(${st.length})` : '';
@@ -495,6 +597,7 @@ function renderStops() {
       ${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
       <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
       ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
+      ${s.kunde || s.strasse ? noteHtml(s, 'list|' + s.id) : ''}
       <div class="tools"><button class="icon" data-act="edit" aria-label="Bearbeiten">✎</button><button class="icon del" data-act="del" aria-label="Löschen">✕</button></div>
       ${ed ? `<div class="edit" data-edit>
         <input class="full" name="kunde" placeholder="Kunde" value="${esc(s.kunde)}">
@@ -680,7 +783,7 @@ async function googleSearch(s) {
   }
   if (!best) return null;
   const p = best.p;
-  return { status: 'found', source: 'google', confidence: best.conf, name: p.displayName?.text || '', address: p.formattedAddress || '',
+  return { status: 'found', source: 'google', placeId: p.id || '', confidence: best.conf, name: p.displayName?.text || '', address: p.formattedAddress || '',
     periods: p.regularOpeningHours?.periods || null, weekday: p.regularOpeningHours?.weekdayDescriptions || null,
     current: p.currentOpeningHours?.periods || null, oh: (p.regularOpeningHours?.periods || p.currentOpeningHours?.periods) ? 'google' : '',
     phone: p.nationalPhoneNumber || '', website: p.websiteUri || '', gmaps: p.googleMapsUri || '', dist: Math.round(best.d), ts: Date.now() };
@@ -837,11 +940,13 @@ function hoursHtml(s, sched, res) {
 
 function saveResult(res) {
   res = res || state.result; if (!res) return;
+  res.updated = Date.now();
   const i = tours.findIndex(t => t.id === res.id); if (i >= 0) tours[i] = res; LS.set('tp_tours', tours);
   if (state.result && state.result.id === res.id) { state.result = res; saveState(); }
 }
 
-function renderResult() {
+function renderResult() { keepNoteEditing(renderResultInner); }
+function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
   if (!res) { sec.hidden = true; mapFor = null; return; }
   sec.hidden = false;
@@ -876,6 +981,7 @@ function renderResult() {
       ${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
       <div class="a">${esc(addrText(s))}</div>
       <div class="leg">🚗 ${fmtMin(l.dur)} · ${fmtKm(l.dist)} Anfahrt</div>
+      ${noteHtml(s, 'route|' + i)}
       ${r.done ? '' : hoursHtml(s, r, res)}
       <div class="stopctl">
         ${r.done ? `<button class="btn small secondary" data-act="undo">↶ Rückgängig</button>` : `<label class="onsite">Vor Ort <input type="number" min="0" max="600" inputmode="numeric" data-act="onsite" value="${onsiteOf(s)}"> Min.</label><button class="btn small donebtn" data-act="done">✓ Erledigt</button>`}
@@ -960,6 +1066,8 @@ function bind() {
     state.stops = []; state.firstId = null; state.result = null; saveState(); render();
   });
   $('#stopList').addEventListener('click', e => {
+    if (handleNoteClick(e)) return;
+    if (e.target.closest('.dnote')) return;
     const li = e.target.closest('.stop'); if (!li) return;
     const s = state.stops.find(x => x.id === li.dataset.id); if (!s) return;
     const act = e.target.closest('[data-act]')?.dataset.act;
@@ -976,7 +1084,22 @@ function bind() {
     saveState(); renderStops(); renderResult();
   });
   $('#planBtn').addEventListener('click', plan);
+  $('#stopList').addEventListener('focusout', handleNoteBlur);
+  $('#routeList').addEventListener('focusout', handleNoteBlur);
+  $('#notesList').addEventListener('click', e => {
+    const act = e.target.closest('[data-act]')?.dataset.act; const li = e.target.closest('.nitem'); if (!act || !li) return;
+    const n = notes[li.dataset.key]; if (!n || n.deleted) return;
+    if (act === 'nl-edit') noteListEdit = n.key;
+    else if (act === 'nl-cancel') noteListEdit = null;
+    else if (act === 'nl-save') { const v = li.querySelector('textarea').value; if (v.trim()) { n.text = v.replace(/\s+$/, ''); n.updated = Date.now(); } else delNote(n.key); saveNotes(); noteListEdit = null; rerenderNotes(); toast('Notiz gespeichert'); }
+    else if (act === 'nl-del') { if (!confirm(`Notiz für „${n.name}“ löschen?`)) return; delNote(n.key); saveNotes(); rerenderNotes(); }
+    renderNotesList();
+  });
+  $('#exportNotes').addEventListener('click', exportNotes);
+  $('#importNotes').addEventListener('change', e => { const f = e.target.files[0]; if (f) importNotes(f); e.target.value = ''; });
+  renderNotesList();
   $('#routeList').addEventListener('click', e => {
+    if (handleNoteClick(e)) return;
     const b = e.target.closest('[data-act]'); const li = e.target.closest('.rstop'); if (!b || !li || !state.result) return;
     const s = state.result.stops[+li.dataset.i]; if (!s) return;
     if (b.dataset.act === 'done') { s.done = Date.now(); toast(`${label(s)} erledigt – Zeiten neu berechnet`); }
@@ -1037,5 +1160,5 @@ if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => 
 else if (!getDriver()) openSettings();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // für Tests
-window.TP = { computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan };
+window.TP = { notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan };
 window.addEventListener('hashchange', () => { if (/[#&]setup=/.test(location.hash)) location.reload(); });

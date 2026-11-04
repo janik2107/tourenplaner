@@ -71,6 +71,17 @@
     <ul class="list" id="tourList"></ul>
   </section>
 
+  <details class="group settings" id="notesSection">
+    <summary>Notizen <span class="count" id="notesCount"></span></summary>
+    <p class="note">Notizen gehören zum Händler und erscheinen automatisch bei jeder neuen Tour. Sie bleiben nur auf diesem Gerät – zum Übertragen exportieren und auf dem anderen Handy importieren.</p>
+    <ul class="list" id="notesList"></ul>
+    <div class="actions" style="margin-top:10px">
+      <button class="btn secondary" id="exportNotes">Exportieren</button>
+      <label class="btn secondary" for="importNotes">Importieren</label>
+      <input type="file" id="importNotes" accept="application/json,.json" hidden>
+    </div>
+  </details>
+
   <details class="group settings" id="settings">
     <summary>Einstellungen</summary>
     <div id="driverFields"></div>
