@@ -58,10 +58,12 @@
   <section class="group" id="resultSection" hidden>
     <div class="group-head"><h2>Tour</h2><span class="sub" id="resultMeta"></span></div>
     <div class="totals" id="totals"></div>
+    <div class="tourctl" id="tourCtl"></div>
+    <div class="nextbox" id="nextBox" hidden></div>
     <div id="map"></div>
     <div class="navbtns" id="routeBtns"></div>
     <ul class="list route" id="routeList"></ul>
-    <p class="note">Schätzung ohne Verkehr und ohne Standzeit vor Ort. Routing: OSRM / OpenStreetMap.</p>
+    <p class="note">Ankunftszeiten sind Schätzungen ohne Verkehr (Fahrzeit + eingestellte Zeit vor Ort). Öffnungszeiten aus OpenStreetMap – können fehlen oder veraltet sein. Routing: OSRM.</p>
   </section>
 
   <section class="group">
@@ -74,6 +76,10 @@
     <div id="driverFields"></div>
     <button class="link" id="addDriver" style="margin-top:10px">+ Fahrer hinzufügen</button>
     <p class="note">Tipp: Wird eine Adresse nicht genau gefunden, Koordinaten eintragen (in Google Maps lange auf den Punkt drücken und Koordinaten kopieren). Fahrer und Adressen werden nur auf diesem Gerät gespeichert.</p>
+    <div class="two">
+      <label class="field">Standard-Abfahrt<input type="time" id="defStart"></label>
+      <label class="field">Minuten vor Ort je Stopp<input type="number" id="defOnsite" min="0" max="600" inputmode="numeric"></label>
+    </div>
     <label class="check"><input type="checkbox" id="coordLinks"> Navigationslinks mit Koordinaten statt Adressen</label>
     <div class="actions">
       <button class="btn secondary" id="saveSettings">Speichern</button>

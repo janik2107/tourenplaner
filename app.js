@@ -12,7 +12,9 @@ const LS = {
 const DEFAULT_SETTINGS = {
   drivers: [],          // [{name, address, lat, lon}] – nur lokal gespeichert, nie im Code
   defaultDriver: null,
-  coordLinks: false
+  coordLinks: false,
+  startTime: '05:30',   // Standard-Abfahrtszeit
+  onsite: 5             // Standard-Minuten vor Ort je Stopp
 };
 const KNOWN_CATS = ['WF (DE)', 'AGCO Bl_DE', 'Creditplus', 'DLL Blue', 'Cosmo', 'PF Service', 'Open AG'];
 
@@ -144,7 +146,6 @@ async function handleFiles(files) {
     console.error(e); setOcr('Fehler bei der Texterkennung: ' + e.message, 0);
     toast('Texterkennung fehlgeschlagen: ' + e.message);
   }
-  setTimeout(() => { $('#ocrStatus').hidden = true; }, 2500);
 }
 
 /* ---------------- Parser ---------------- */
@@ -302,7 +303,7 @@ async function geocode(a) {
     approx = !!hit;
   }
   if (!hit) return null;
-  const res = { lat: +hit.lat, lon: +hit.lon, approx, label: hit.display_name };
+  const res = { lat: +hit.lat, lon: +hit.lon, approx, label: hit.display_name, state: hit.address?.state || '' };
   geoCache[key] = res; LS.set('tp_geocache', geoCache);
   return res;
 }
@@ -414,12 +415,14 @@ async function plan() {
     const result = {
       id: uid(), created: Date.now(), driver: drv.name, driverName: drv.name, datum,
       home: { addr: drv.address, lat: home.lat, lon: home.lon, approx: home.approx },
-      stops: ordered, legs, geometry,
+      stops: ordered.map(o => Object.assign(o, { onsite: null, done: null })), legs, geometry,
+      startTime: settings.startTime || '05:30',
       totalDur: legs.reduce((a, l) => a + l.dur, 0), totalDist: legs.reduce((a, l) => a + l.dist, 0)
     };
     state.result = result; saveState();
     tours.unshift(result); tours = tours.slice(0, 20); LS.set('tp_tours', tours);
     renderResult(); renderTours();
+    fetchHoursForResult(result);
     $('#resultSection').scrollIntoView({ behavior: 'smooth' });
     if (home.approx) toast('Hinweis: Startadresse nur ungefähr gefunden (PLZ/Ort).', 5000);
   } catch (e) {
@@ -503,14 +506,222 @@ function renderStops() {
     </li>`;
   }).join('');
 }
-let map = null, mapLayer = null;
+let map = null, mapLayer = null, mapFor = null;
+const label = s => [s.auftrag, s.kunde].filter(Boolean).join(' · ') || addrText(s);
+const hhmm = d => d ? d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '–';
+const WD = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+function tourDate(res) {
+  const m = (res.datum || '').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+  const d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : new Date(); d.setHours(0, 0, 0, 0); return d;
+}
+const onsiteOf = s => (s.onsite != null && s.onsite !== '' ? +s.onsite : (+settings.onsite || 0));
+
+/* Zeitplan: Start + Fahrzeit + Standzeit; nach „Erledigt“ ab Erledigt-Zeitpunkt neu gerechnet */
+function computeSchedule(res) {
+  const d = tourDate(res); const [h, m] = (res.startTime || settings.startTime || '05:30').split(':').map(Number);
+  let cursor = new Date(d.getTime() + ((h || 0) * 60 + (m || 0)) * 60000);
+  const rows = res.stops.map((s, i) => {
+    const drive = (res.legs[i]?.dur || 0) * 1000;
+    if (s.done) { cursor = new Date(s.done); return { done: true, dep: cursor }; }
+    const arr = new Date(cursor.getTime() + drive), dep = new Date(arr.getTime() + onsiteOf(s) * 60000);
+    cursor = dep; return { done: false, arr, dep };
+  });
+  const homeArr = new Date(cursor.getTime() + (res.legs[res.stops.length]?.dur || 0) * 1000);
+  const next = rows.findIndex(r => !r.done);
+  return { rows, homeArr, next };
+}
+
+/* ---------------- Öffnungszeiten (OpenStreetMap / Overpass + opening_hours.js) ---------------- */
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+let hoursCache = LS.get('tp_hours', {});
+const hoursKey = s => `${s.auftrag || ''}|${s.kunde || ''}|${s.geo ? s.geo.lat.toFixed(4) + ',' + s.geo.lon.toFixed(4) : ''}`;
+function cachedHours(s) {
+  const c = hoursCache[hoursKey(s)]; if (!c) return null;
+  const ttl = (c.status === 'found' && c.oh ? 30 : c.status === 'found' ? 7 : 3) * 864e5;
+  return Date.now() - c.ts < ttl ? c : null;
+}
+const scriptP = {};
+function loadScript(src) {
+  return scriptP[src] || (scriptP[src] = new Promise((res, rej) => {
+    const el = document.createElement('script'); el.src = src; el.onload = res; el.onerror = () => { delete scriptP[src]; rej(new Error('Skript nicht ladbar: ' + src)); }; document.head.appendChild(el);
+  }));
+}
+async function loadOH() {
+  if (window.opening_hours) return;
+  await loadScript('https://cdn.jsdelivr.net/npm/suncalc@1.9.0/suncalc.js');
+  await loadScript('https://cdn.jsdelivr.net/npm/opening_hours@3.15.0/build/opening_hours.js');
+}
+const STATES = ['Baden-Württemberg', 'Bayern', 'Berlin', 'Brandenburg', 'Bremen', 'Hamburg', 'Hessen', 'Mecklenburg-Vorpommern', 'Niedersachsen', 'Nordrhein-Westfalen', 'Rheinland-Pfalz', 'Saarland', 'Sachsen-Anhalt', 'Sachsen', 'Schleswig-Holstein', 'Thüringen'];
+function makeOH(str, s) {
+  if (!window.opening_hours || !str) return null;
+  const st = s.geo?.state || STATES.find(x => (s.geo?.label || '').includes(x)) || '';
+  const nom = { lat: s.geo?.lat || 51, lon: s.geo?.lon || 10, address: { country_code: 'de', state: st } };
+  try { return new opening_hours(str, nom, { locale: 'de' }); } catch (e) {
+    try { return new opening_hours(str, nom); } catch (e2) { return null; }
+  }
+}
+// Namensvergleich: Rechtsformen und Füllwörter ignorieren
+const LEGAL = new Set(['gmbh', 'mbh', 'co', 'kg', 'ohg', 'ag', 'ug', 'gbr', 'ek', 'e', 'k', 'inh', 'inhaber', 'und', 'u', 'haftungsbeschraenkt', 'niederlassung', 'filiale', 'der', 'die', 'das', 'am', 'an', 'in']);
+const WEAK = new Set(['autohaus', 'auto', 'autos', 'automobile', 'automobil', 'kfz', 'service', 'center', 'centrum', 'zentrum', 'werkstatt', 'handel', 'gruppe', 'technik', 'soehne', 'sohn', 'waren', 'fahrzeuge', 'fahrzeug', 'cars', 'car', 'motors', 'motor', 'partner']);
+function toks(x) {
+  return (x || '').toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/e\.\s?k\./g, ' ').replace(/[^a-z0-9]+/g, ' ').split(' ').filter(t => t.length >= 2 && !LEGAL.has(t));
+}
+function tokEq(a, b) {
+  if (a === b) return true;
+  if (a.length >= 5 && b.length >= 5 && lev(a, b) <= 1) return true;
+  return Math.min(a.length, b.length) >= 4 && (a.startsWith(b) || b.startsWith(a));
+}
+function nameScore(kunde, tags, ort) {
+  const ct = toks(kunde); if (!ct.length) return 0;
+  const weakLocal = new Set(toks(ort));   // Ortsname im Firmennamen zählt kaum
+  let best = 0;
+  for (const k of ['name', 'brand', 'operator', 'official_name', 'alt_name', 'short_name']) {
+    if (!tags[k]) continue;
+    const nt = toks(tags[k]); let tot = 0, hit = 0, strongHit = 0, strongTot = 0;
+    for (const t of ct) {
+      const w = WEAK.has(t) || weakLocal.has(t) ? 0.25 : 1; tot += w; if (w === 1) strongTot++;
+      if (nt.some(n => tokEq(t, n))) { hit += w; if (w === 1) strongHit++; }
+    }
+    let sc = tot ? hit / tot : 0;
+    if (strongTot && !strongHit) sc = 0;
+    best = Math.max(best, sc);
+  }
+  return best;
+}
+const RELEVANT = t => (t.shop || t.craft || t.office || t.amenity || t.company || t.industrial || t.tourism || t.healthcare || t.leisure ||
+  (t.building && !t.highway) || /^(commercial|retail|industrial)$/.test(t.landuse || '')) && !t.highway && !t.boundary && !t.route && !t.place && !t.public_transport && !t.railway;
+function distM(a, b) {
+  const R = 6371000, r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+async function overpass(query) {
+  let lastErr;
+  for (let round = 0; round < 2; round++) for (const url of OVERPASS) {
+    try {
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 30000);
+      const r = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(query), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal: ctl.signal });
+      clearTimeout(to);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return (await r.json()).elements || [];
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('Overpass nicht erreichbar');
+}
+async function searchHours(stops, radius) {
+  const q = `[out:json][timeout:25];(${stops.map(s => `nwr(around:${radius},${s.geo.lat.toFixed(6)},${s.geo.lon.toFixed(6)})[name];`).join('')});out tags center;`;
+  const els = (await overpass(q)).map(e => ({ tags: e.tags || {}, lat: e.lat ?? e.center?.lat, lon: e.lon ?? e.center?.lon, id: e.type + '/' + e.id })).filter(e => e.lat != null && RELEVANT(e.tags));
+  const out = new Map();
+  for (const s of stops) {
+    let best = null;
+    for (const e of els) {
+      const d = distM(s.geo, e); if (d > radius + 40) continue;
+      const sc = nameScore(s.kunde, e.tags, s.ort); if (sc < 0.6) continue;
+      const rank = sc + (e.tags.opening_hours ? 0.15 : 0) + (/^car/.test(e.tags.shop || '') ? 0.05 : 0) - d / 20000;
+      if (!best || rank > best.rank) best = { rank, e, d };
+    }
+    if (best) {
+      const t = best.e.tags;
+      out.set(s, { status: 'found', name: t.name, oh: t.opening_hours || '', phone: t.phone || t['contact:phone'] || '', website: t.website || t['contact:website'] || '', osm: 'https://www.openstreetmap.org/' + best.e.id, dist: Math.round(best.d), ts: Date.now() });
+    }
+  }
+  return out;
+}
+let hoursBusy = false; const hoursRetries = {};
+async function fetchHoursForResult(res, force) {
+  if (hoursBusy) return; hoursBusy = true;
+  try {
+    const need = [];
+    for (const s of res.stops) {
+      if (!s.geo) continue;
+      if (force || s.hours?.status === 'error' || s.hours?.status === 'loading') s.hours = null;
+      if (!s.hours && !force) s.hours = cachedHours(s);
+      if (!s.hours) need.push(s);
+    }
+    if (need.length) {
+      need.forEach(s => s.hours = { status: 'loading' }); renderResult();
+      try {
+        let left = need;
+        for (const r of [200, 600]) {
+          if (!left.length) break;
+          const found = await searchHours(left, r);
+          for (const [s, h] of found) { s.hours = h; hoursCache[hoursKey(s)] = h; }
+          left = left.filter(s => !found.has(s));
+        }
+        for (const s of left) { s.hours = { status: 'none', ts: Date.now() }; hoursCache[hoursKey(s)] = s.hours; }
+        LS.set('tp_hours', hoursCache);
+      } catch (e) {
+        console.warn('Overpass', e); need.forEach(s => { if (s.hours?.status === 'loading') s.hours = { status: 'error' }; });
+        // Overpass-Server sind oft überlastet: später automatisch erneut versuchen
+        if ((hoursRetries[res.id] = (hoursRetries[res.id] || 0) + 1) <= 4) setTimeout(() => { if (state.result?.id === res.id) fetchHoursForResult(state.result); }, 45000 * hoursRetries[res.id]);
+      }
+    }
+    if (res.stops.some(s => s.hours?.oh)) await loadOH().catch(e => console.warn(e));
+    saveResult(res);
+  } finally { hoursBusy = false; renderResult(); }
+}
+function fmtIntervals(oh, day) {
+  const to = new Date(day.getTime() + 864e5);
+  try {
+    const iv = oh.getOpenIntervals(day, to);
+    if (!iv.length) return 'geschlossen';
+    return iv.map(([a, b, unk]) => (b - a >= 864e5 - 60000 ? '24 Std.' : `${hhmm(a)}–${b.getHours() === 0 && b.getMinutes() === 0 ? '24:00' : hhmm(b)}`) + (unk ? ' (?)' : '')).join(', ');
+  } catch { return '?'; }
+}
+function hoursHtml(s, sched, res) {
+  const h = s.hours; const gq = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([s.kunde, s.ort].filter(Boolean).join(' '))}`;
+  const glink = `<a href="${esc(gq)}" target="_blank" rel="noopener">In Google Maps prüfen</a>`;
+  if (!h || h.status === 'loading') return `<div class="oh muted">🕘 Öffnungszeiten werden gesucht …</div>`;
+  if (h.status === 'error') return `<div class="oh muted">🕘 Öffnungszeiten konnten nicht geladen werden (Server überlastet). <button class="link" data-act="retryhours">Erneut versuchen</button> · ${glink}</div>`;
+  const extra = [h.phone ? `<a href="tel:${esc(h.phone.replace(/[^+\d]/g, ''))}">📞 ${esc(h.phone)}</a>` : '', h.website ? `<a href="${esc(/^https?:/.test(h.website) ? h.website : 'https://' + h.website)}" target="_blank" rel="noopener">🌐 Webseite</a>` : ''].filter(Boolean).join(' · ');
+  if (h.status === 'none' || !h.oh) {
+    return `<div class="oh muted">🕘 Keine Öffnungszeiten gefunden${h.status === 'found' ? ` (OSM: ${esc(h.name)})` : ''} · ${glink}${extra ? '<br>' + extra : ''}</div>`;
+  }
+  const oh = makeOH(h.oh, s);
+  if (!oh) return `<div class="oh">🕘 ${esc(h.oh)}<br><span class="muted">(${esc(h.name)} · OSM) · ${glink}</span>${extra ? '<br>' + extra : ''}</div>`;
+  const day = tourDate(res); const dayRef = sched && !sched.done && sched.arr ? new Date(sched.arr) : day; dayRef.setHours(0, 0, 0, 0);
+  let warn = '';
+  if (sched && !sched.done && sched.arr) {
+    try {
+      const open = oh.getState(sched.arr), nx = oh.getNextChange(sched.arr);
+      if (!open) {
+        const sameDay = nx && nx.toDateString() === sched.arr.toDateString();
+        warn = `⚠️ Ankunft ${hhmm(sched.arr)} – ${sameDay ? 'öffnet erst um ' + hhmm(nx) : 'an diesem Tag geschlossen'}`;
+      } else if (nx && nx < sched.dep) warn = `⚠️ Schließt um ${hhmm(nx)} – vor der geplanten Abfahrt ${hhmm(sched.dep)}`;
+    } catch { }
+  }
+  const mon = new Date(dayRef); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7));
+  const week = [...Array(7)].map((_, i) => { const d = new Date(mon); d.setDate(mon.getDate() + i); const cur = d.getTime() === dayRef.getTime();
+    return `<tr class="${cur ? 'cur' : ''}"><td>${WD[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}.</td><td>${fmtIntervals(oh, d)}</td></tr>`; }).join('');
+  return `<details class="oh${warn ? ' warnbox' : ''}"><summary>🕘 ${WD[dayRef.getDay()]}: <b>${fmtIntervals(oh, dayRef)}</b>${warn ? `<div class="ohwarn">${warn}</div>` : ''}</summary>
+    <table class="week">${week}</table><div class="muted small">${esc(h.name)} · Quelle: <a href="${esc(h.osm)}" target="_blank" rel="noopener">OpenStreetMap</a> · ${glink}</div>${extra ? `<div class="small">${extra}</div>` : ''}</details>`;
+}
+
+function saveResult(res) {
+  res = res || state.result; if (!res) return;
+  const i = tours.findIndex(t => t.id === res.id); if (i >= 0) tours[i] = res; LS.set('tp_tours', tours);
+  if (state.result && state.result.id === res.id) { state.result = res; saveState(); }
+}
+
 function renderResult() {
   const res = state.result, sec = $('#resultSection');
-  if (!res) { sec.hidden = true; return; }
+  if (!res) { sec.hidden = true; mapFor = null; return; }
   sec.hidden = false;
+  const S = computeSchedule(res);
+  const doneN = res.stops.filter(s => s.done).length;
   $('#resultMeta').textContent = `${res.driverName} · ${res.datum}`;
-  $('#totals').innerHTML = `<div><b>${fmtKm(res.totalDist)}</b><span>Strecke</span></div><div><b>${fmtMin(res.totalDur).replace(' Min.', ' m').replace(' Std.', ' h')}</b><span>Fahrzeit</span></div><div><b>${res.stops.length}</b><span>Stopps</span></div>`;
+  $('#totals').innerHTML = `<div><b>${fmtKm(res.totalDist)}</b><span>Strecke</span></div><div><b>${fmtMin(res.totalDur).replace(' Min.', ' m').replace(' Std.', ' h')}</b><span>Fahrzeit</span></div><div><b>${doneN ? doneN + '/' : ''}${res.stops.length}</b><span>${doneN ? 'erledigt' : 'Stopps'}</span></div>`;
+  $('#tourCtl').innerHTML = `<label>Abfahrt <input type="time" id="tourStart" value="${esc(res.startTime || settings.startTime)}"></label><span>Zurück ca. <b>${hhmm(S.homeArr)}</b></span>`;
   const pts = routePoints(res);
+  // Nächster Stopp
+  if (S.next >= 0) {
+    const s = res.stops[S.next], r = S.rows[S.next], p = pts[S.next + 1];
+    $('#nextBox').innerHTML = `<div class="nb-l">Nächster Stopp</div><div class="nb-t"><span class="ordno">${esc(s.auftrag || '–')}</span> ${esc(s.kunde || addrText(s))}</div>
+      <div class="nb-eta">Ankunft ca. <b>${hhmm(r.arr)}</b></div>
+      <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`;
+    $('#nextBox').hidden = false;
+  } else { $('#nextBox').innerHTML = `<div class="nb-l">Alle Stopps erledigt ✓</div><div class="nb-eta">Zurück zu Hause ca. <b>${hhmm(S.homeArr)}</b></div>`; $('#nextBox').hidden = false; }
   const g = chunk(pts, 9), a = chunk(pts, 13);
   let html = '';
   html += `<div class="row">${g.map((p, i) => `<a class="btn gmaps" target="_blank" rel="noopener" href="${esc(googleUrl(p))}">Google Maps${g.length > 1 ? ` ${i + 1}/${g.length}` : ''}</a>`).join('')}</div>`;
@@ -519,24 +730,30 @@ function renderResult() {
   html += '<div class="lbl">Apple-Gesamtroute benötigt iOS 18.4 oder neuer. Sonst die Einzel-Links je Stopp verwenden.</div>';
   $('#routeBtns').innerHTML = html;
   const rows = res.stops.map((s, i) => {
-    const l = res.legs[i] || { dur: 0, dist: 0 }; const p = pts[i + 1];
-    return `<li class="stop"><div class="badge" style="background:var(--blue);color:#fff">${i + 1}</div>
-      <div class="leg">↳ ${fmtMin(l.dur)} · ${fmtKm(l.dist)}</div>
-      <div class="h">${s.auftrag ? `${esc(s.auftrag)} <span class="cat">| ${esc(s.kategorie)}</span>` : ''}</div>
+    const l = res.legs[i] || { dur: 0, dist: 0 }; const p = pts[i + 1], r = S.rows[i], isNext = i === S.next;
+    const eta = r.done ? `<div class="eta done">✓ Erledigt um ${hhmm(r.dep)}</div>`
+      : `<div class="eta">${isNext ? '<span class="nexttag">Als Nächstes</span> ' : ''}Ankunft ca. <b>${hhmm(r.arr)}</b> <span class="muted">· weiter ${hhmm(r.dep)}</span></div>`;
+    return `<li class="stop rstop${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}"><div class="badge">${r.done ? '✓' : i + 1}</div>
+      ${eta}
+      <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}</div>
       ${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
       <div class="a">${esc(addrText(s))}</div>
-      ${s.typ && /termin/i.test(s.typ) ? `<div class="tags"><span class="tag termin">${esc(s.typ)}</span></div>` : ''}
-      <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>
+      <div class="leg">🚗 ${fmtMin(l.dur)} · ${fmtKm(l.dist)} Anfahrt</div>
+      ${r.done ? '' : hoursHtml(s, r, res)}
+      <div class="stopctl">
+        ${r.done ? `<button class="btn small secondary" data-act="undo">↶ Rückgängig</button>` : `<label class="onsite">Vor Ort <input type="number" min="0" max="600" inputmode="numeric" data-act="onsite" value="${onsiteOf(s)}"> Min.</label><button class="btn small donebtn" data-act="done">✓ Erledigt</button>`}
+      </div>
+      ${r.done ? '' : `<div class="navlbl">Navigation zu ${esc(label(s))}</div><div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`}
     </li>`;
   });
   const lb = res.legs[res.stops.length] || { dur: 0, dist: 0 };
-  rows.push(`<li class="stop"><div class="badge" style="background:var(--green);color:#000">⌂</div><div class="leg">↳ ${fmtMin(lb.dur)} · ${fmtKm(lb.dist)}</div><div class="k">Zurück nach Hause</div><div class="a">${esc(res.home.addr)}</div>
+  rows.push(`<li class="stop rstop"><div class="badge" style="background:var(--green);color:#000">⌂</div><div class="eta">Zurück ca. <b>${hhmm(S.homeArr)}</b></div><div class="k">Zurück nach Hause</div><div class="a">${esc(res.home.addr)}</div><div class="leg">🚗 ${fmtMin(lb.dur)} · ${fmtKm(lb.dist)}</div>
     <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(pts[0]))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(pts[0]))}">Apple Karten</a></div></li>`);
   $('#routeList').innerHTML = rows.join('');
-  renderMap(res);
+  if (mapFor !== res.id) { mapFor = res.id; renderMap(res); }
 }
 function shortName(p, res) {
-  const s = res.stops.find(x => addrText(x) === p.addr); if (!s) return p.addr; const k = s.kunde.length > 22 ? s.kunde.slice(0, 21) + '…' : s.kunde; return s.ort + (k ? ` (${k})` : '');
+  const s = res.stops.find(x => addrText(x) === p.addr); if (!s) return p.addr; const k = s.kunde.length > 22 ? s.kunde.slice(0, 21) + '…' : s.kunde; return (s.auftrag ? s.auftrag + ' · ' : '') + s.ort + (k ? ` (${k})` : '');
 }
 function renderMap(res) {
   if (typeof L === 'undefined') { $('#map').hidden = true; return; }
@@ -550,15 +767,16 @@ function renderMap(res) {
   if (res.geometry) L.polyline(res.geometry, { color: '#0a84ff', weight: 4, opacity: .9 }).addTo(mapLayer);
   else L.polyline([...ll, ll[0]], { color: '#0a84ff', weight: 3, dashArray: '6 6' }).addTo(mapLayer);
   L.marker(ll[0], { icon: L.divIcon({ className: 'num-marker home', html: '⌂' }) }).addTo(mapLayer);
-  res.stops.forEach((s, i) => L.marker(ll[i + 1], { icon: L.divIcon({ className: 'num-marker', html: String(i + 1) }) }).bindPopup(esc(s.kunde || addrText(s))).addTo(mapLayer));
+  res.stops.forEach((s, i) => L.marker(ll[i + 1], { icon: L.divIcon({ className: 'num-marker', html: String(i + 1) }) }).bindPopup(esc(label(s))).addTo(mapLayer));
   setTimeout(() => { map.invalidateSize(); map.fitBounds(L.latLngBounds(ll), { padding: [24, 24] }); }, 50);
 }
 function renderTours() {
   const ul = $('#tourList');
   if (!tours.length) { ul.innerHTML = '<li class="empty">Noch keine Touren geplant.</li>'; return; }
-  ul.innerHTML = tours.map(t => `<li class="tour" data-tid="${t.id}">
-    <div><div class="t">${esc(t.driverName)} · ${esc(t.datum)}</div><div class="s">${t.stops.length} Stopps · ${fmtKm(t.totalDist)} · ${fmtMin(t.totalDur)}</div></div>
-    <div style="display:flex;gap:6px"><button class="btn small secondary" data-act="open">Öffnen</button><button class="icon del" data-act="deltour" aria-label="Löschen">✕</button></div></li>`).join('');
+  ul.innerHTML = tours.map(t => { const dn = t.stops.filter(s => s.done).length; return `<li class="tour" data-tid="${t.id}">
+    <div><div class="t">${esc(t.driverName)} · ${esc(t.datum)}</div><div class="s">${t.stops.length} Stopps${dn ? ` (${dn} erledigt)` : ''} · ${fmtKm(t.totalDist)} · ${fmtMin(t.totalDur)}</div>
+    <div class="s ords">Aufträge: ${t.stops.map(s => esc(s.auftrag || '–')).join(', ')}</div></div>
+    <div style="display:flex;gap:6px"><button class="btn small secondary" data-act="open">Öffnen</button><button class="icon del" data-act="deltour" aria-label="Löschen">✕</button></div></li>`; }).join('');
 }
 
 /* ---------------- Einstellungen ---------------- */
@@ -611,27 +829,42 @@ function bind() {
     if (act === 'del') { state.stops = state.stops.filter(x => x !== s); if (state.firstId === s.id) state.firstId = null; state.result = null; }
     else if (act === 'edit') state.editing = state.editing === s.id ? null : s.id;
     else if (act === 'cancel') state.editing = null;
-const getDriver = () => { const ds = settings.drivers.filter(d => d.name && d.address); return ds.find(d => d.name === state.driver) || ds.find(d => d.name === settings.defaultDriver) || ds[0] || null; };
-if (getDriver()) state.driver = getDriver().name;
     else if (act === 'save') {
       const box = li.querySelector('[data-edit]'); const old = addrText(s);
       box.querySelectorAll('input').forEach(i => s[i.name] = i.value.trim());
       if (addrText(s) !== old) { s.geo = null; s.geoErr = null; }
-      state.editing = null;
-const getDriver = () => { const ds = settings.drivers.filter(d => d.name && d.address); return ds.find(d => d.name === state.driver) || ds.find(d => d.name === settings.defaultDriver) || ds[0] || null; };
-if (getDriver()) state.driver = getDriver().name; state.result = null;
+      state.editing = null; state.result = null;
     } else if (e.target.closest('[data-edit]')) return;
     else { state.firstId = state.firstId === s.id ? null : s.id; state.result = null; }
     saveState(); renderStops(); renderResult();
   });
   $('#planBtn').addEventListener('click', plan);
+  $('#routeList').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]'); const li = e.target.closest('.rstop'); if (!b || !li || !state.result) return;
+    const s = state.result.stops[+li.dataset.i]; if (!s) return;
+    if (b.dataset.act === 'done') { s.done = Date.now(); toast(`${label(s)} erledigt – Zeiten neu berechnet`); }
+    else if (b.dataset.act === 'undo') { s.done = null; }
+    else if (b.dataset.act === 'retryhours') { fetchHoursForResult(state.result, false); return; }
+    else return;
+    saveResult(); renderResult(); renderTours();
+  });
+  $('#routeList').addEventListener('change', e => {
+    if (e.target.dataset.act !== 'onsite' || !state.result) return;
+    const s = state.result.stops[+e.target.closest('.rstop').dataset.i];
+    s.onsite = Math.max(0, Math.min(600, parseInt(e.target.value, 10) || 0)); saveResult(); renderResult();
+  });
+  $('#tourCtl').addEventListener('change', e => {
+    if (e.target.id !== 'tourStart' || !state.result) return;
+    state.result.startTime = e.target.value || settings.startTime; saveResult(); renderResult();
+  });
   $('#tourList').addEventListener('click', e => {
     const li = e.target.closest('.tour'); if (!li) return;
     const act = e.target.closest('[data-act]')?.dataset.act; const t = tours.find(x => x.id === li.dataset.tid);
     if (act === 'deltour') { tours = tours.filter(x => x !== t); LS.set('tp_tours', tours); renderTours(); }
-    else if (act === 'open' && t) { state.result = t; saveState(); renderResult(); $('#resultSection').scrollIntoView({ behavior: 'smooth' }); }
+    else if (act === 'open' && t) { state.result = t; saveState(); renderResult(); fetchHoursForResult(t); $('#resultSection').scrollIntoView({ behavior: 'smooth' }); }
   });
   $('#coordLinks').checked = !!settings.coordLinks;
+  $('#defStart').value = settings.startTime || '05:30'; $('#defOnsite').value = settings.onsite ?? 5;
   renderDriverFields();
   $('#addDriver').addEventListener('click', () => { collectDriverFields(); settings.drivers.push({ name: '', address: '', lat: null, lon: null }); renderDriverFields(true); });
   $('#driverFields').addEventListener('click', e => {
@@ -647,6 +880,8 @@ if (getDriver()) state.driver = getDriver().name; state.result = null;
     if (!settings.drivers.length) return toast('Bitte mindestens einen Fahrer eintragen.');
     if (!settings.drivers.some(d => d.name === settings.defaultDriver)) settings.defaultDriver = settings.drivers[0].name;
     settings.coordLinks = $('#coordLinks').checked;
+    settings.startTime = $('#defStart').value || '05:30';
+    settings.onsite = Math.max(0, parseInt($('#defOnsite').value, 10) || 0);
     saveSettingsLS(); if (!getDriver() || !settings.drivers.some(d => d.name === state.driver)) state.driver = getDriver().name;
     state.result = null; saveState(); renderDriverFields(); renderDriver(); renderResult(); toast('Gespeichert');
   });
@@ -654,9 +889,10 @@ if (getDriver()) state.driver = getDriver().name; state.result = null;
 }
 
 bind(); render();
+if (state.result) fetchHoursForResult(state.result);
 if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => d.name).join(', '), 4000);
 else if (!getDriver()) openSettings();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // für Tests
-window.TP = { parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan };
+window.TP = { computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan };
 window.addEventListener('hashchange', () => { if (/[#&]setup=/.test(location.hash)) location.reload(); });
