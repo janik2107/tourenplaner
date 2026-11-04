@@ -259,11 +259,12 @@ let lastNominatim = 0;
 async function nominatim(params) {
   const wait = lastNominatim + 1100 - Date.now(); if (wait > 0) await sleep(wait);
   lastNominatim = Date.now();
-  const qs = new URLSearchParams(Object.assign({ format: 'jsonv2', limit: '1', countrycodes: 'de', addressdetails: '1', 'accept-language': 'de' }, params));
+  const qp = Object.assign({ format: 'jsonv2', limit: '1', countrycodes: 'de', addressdetails: '1', 'accept-language': 'de' }, params); delete qp.__all;
+  const qs = new URLSearchParams(qp);
   const r = await fetch('https://nominatim.openstreetmap.org/search?' + qs);
   if (!r.ok) throw new Error('Nominatim HTTP ' + r.status);
   const j = await r.json();
-  return j[0] || null;
+  return params.__all ? j : (j[0] || null);
 }
 const expandStreet = s => s.replace(/\bStr\.?(?=\s|$)/g, 'Straße').replace(/([a-zäöü])str\.?(?=\s|$)/gi, '$1straße');
 const addrText = a => [a.strasse, [a.plz, a.ort].filter(Boolean).join(' ')].filter(Boolean).join(', ');
@@ -598,9 +599,9 @@ function distM(a, b) {
 }
 async function overpass(query) {
   let lastErr;
-  for (let round = 0; round < 2; round++) for (const url of OVERPASS) {
+  for (const url of OVERPASS) {
     try {
-      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 30000);
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 20000);
       const r = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(query), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal: ctl.signal });
       clearTimeout(to);
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -628,6 +629,23 @@ async function searchHours(stops, radius) {
   }
   return out;
 }
+// Ersatzweg, wenn Overpass nicht erreichbar ist: Firmenname über Nominatim suchen (liefert OSM-Zusatzdaten inkl. opening_hours)
+async function nominatimPOI(s) {
+  const nm = (s.kunde || '').replace(/\b(GmbH|mbH|Co\.?|KG|OHG|AG|UG|e\.\s?K\.?|Inh\.?|Inhaber)\b/gi, ' ').replace(/[&,+-]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!nm) return null;
+  const list = await nominatim({ q: `${nm}, ${s.ort || s.plz}`, extratags: '1', limit: '5', __all: true });
+  let best = null;
+  for (const h of list || []) {
+    const tags = Object.assign({ name: h.name || '' }, h.extratags || {});
+    const d = distM(s.geo, { lat: +h.lat, lon: +h.lon }); if (d > 1500) continue;
+    const sc = nameScore(s.kunde, tags, s.ort); if (sc < 0.6) continue;
+    const rank = sc + (tags.opening_hours ? 0.15 : 0) - d / 20000;
+    if (!best || rank > best.rank) best = { rank, h, tags, d };
+  }
+  if (!best) return null;
+  const t = best.tags;
+  return { status: 'found', name: t.name, oh: t.opening_hours || '', phone: t.phone || t['contact:phone'] || '', website: t.website || t['contact:website'] || '', osm: `https://www.openstreetmap.org/${best.h.osm_type}/${best.h.osm_id}`, dist: Math.round(best.d), ts: Date.now() };
+}
 let hoursBusy = false; const hoursRetries = {};
 async function fetchHoursForResult(res, force) {
   if (hoursBusy) return; hoursBusy = true;
@@ -652,9 +670,16 @@ async function fetchHoursForResult(res, force) {
         for (const s of left) { s.hours = { status: 'none', ts: Date.now() }; hoursCache[hoursKey(s)] = s.hours; }
         LS.set('tp_hours', hoursCache);
       } catch (e) {
-        console.warn('Overpass', e); need.forEach(s => { if (s.hours?.status === 'loading') s.hours = { status: 'error' }; });
+        console.warn('Overpass', e);
+        for (const s of need) {
+          if (s.hours?.status !== 'loading') continue;
+          try { const h = await nominatimPOI(s); s.hours = h || { status: 'error' }; if (h) hoursCache[hoursKey(s)] = h; }
+          catch { s.hours = { status: 'error' }; }
+          renderResult();
+        }
+        LS.set('tp_hours', hoursCache);
         // Overpass-Server sind oft überlastet: später automatisch erneut versuchen
-        if ((hoursRetries[res.id] = (hoursRetries[res.id] || 0) + 1) <= 4) setTimeout(() => { if (state.result?.id === res.id) fetchHoursForResult(state.result); }, 45000 * hoursRetries[res.id]);
+        if (need.some(s => s.hours?.status === 'error') && (hoursRetries[res.id] = (hoursRetries[res.id] || 0) + 1) <= 4) setTimeout(() => { if (state.result?.id === res.id) fetchHoursForResult(state.result); }, 45000 * hoursRetries[res.id]);
       }
     }
     if (res.stops.some(s => s.hours?.oh)) await loadOH().catch(e => console.warn(e));
@@ -673,7 +698,7 @@ function hoursHtml(s, sched, res) {
   const h = s.hours; const gq = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([s.kunde, s.ort].filter(Boolean).join(' '))}`;
   const glink = `<a href="${esc(gq)}" target="_blank" rel="noopener">In Google Maps prüfen</a>`;
   if (!h || h.status === 'loading') return `<div class="oh muted">🕘 Öffnungszeiten werden gesucht …</div>`;
-  if (h.status === 'error') return `<div class="oh muted">🕘 Öffnungszeiten konnten nicht geladen werden (Server überlastet). <button class="link" data-act="retryhours">Erneut versuchen</button> · ${glink}</div>`;
+  if (h.status === 'error') return `<div class="oh muted">🕘 Keine Öffnungszeiten gefunden – OSM-Server gerade überlastet, es wird automatisch erneut gesucht. <button class="link" data-act="retryhours">Jetzt erneut suchen</button> · ${glink}</div>`;
   const extra = [h.phone ? `<a href="tel:${esc(h.phone.replace(/[^+\d]/g, ''))}">📞 ${esc(h.phone)}</a>` : '', h.website ? `<a href="${esc(/^https?:/.test(h.website) ? h.website : 'https://' + h.website)}" target="_blank" rel="noopener">🌐 Webseite</a>` : ''].filter(Boolean).join(' · ');
   if (h.status === 'none' || !h.oh) {
     return `<div class="oh muted">🕘 Keine Öffnungszeiten gefunden${h.status === 'found' ? ` (OSM: ${esc(h.name)})` : ''} · ${glink}${extra ? '<br>' + extra : ''}</div>`;
