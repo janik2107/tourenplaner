@@ -140,3 +140,5 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .ords{margin-top:2px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .nextbox .navs{display:flex;gap:8px;margin-top:8px}
+.keyrow{display:flex;gap:8px;margin-top:4px}.keyrow input{flex:1}
+.lowconf{color:var(--orange);font-size:13px;margin-top:4px}

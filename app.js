@@ -37,6 +37,7 @@ let setupApplied = false;
     if (drivers.length) {
       settings.drivers = drivers;
       settings.defaultDriver = drivers.some(d => d.name === cfg.default) ? cfg.default : drivers[0].name;
+      if (typeof cfg.googleKey === 'string' && cfg.googleKey.trim()) settings.googleKey = cfg.googleKey.trim();
       saveSettingsLS();
       const st = LS.get('tp_state', {}); st.driver = settings.defaultDriver; st.result = null; LS.set('tp_state', st);
       setupApplied = true;
@@ -538,7 +539,7 @@ let hoursCache = LS.get('tp_hours', {});
 const hoursKey = s => `${s.auftrag || ''}|${s.kunde || ''}|${s.geo ? s.geo.lat.toFixed(4) + ',' + s.geo.lon.toFixed(4) : ''}`;
 function cachedHours(s) {
   const c = hoursCache[hoursKey(s)]; if (!c) return null;
-  const ttl = (c.status === 'found' && c.oh ? 30 : c.status === 'found' ? 7 : 3) * 864e5;
+  const ttl = (c.source === 'google' ? 7 : c.status === 'found' && c.oh ? 30 : c.status === 'found' ? 7 : 3) * 864e5;
   return Date.now() - c.ts < ttl ? c : null;
 }
 const scriptP = {};
@@ -646,6 +647,87 @@ async function nominatimPOI(s) {
   const t = best.tags;
   return { status: 'found', name: t.name, oh: t.opening_hours || '', phone: t.phone || t['contact:phone'] || '', website: t.website || t['contact:website'] || '', osm: `https://www.openstreetmap.org/${best.h.osm_type}/${best.h.osm_id}`, dist: Math.round(best.d), ts: Date.now() };
 }
+/* ---- Google Places API (New): primäre Quelle, wenn ein Schlüssel auf dem Gerät hinterlegt ist ---- */
+const G_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.location,places.regularOpeningHours,places.currentOpeningHours,places.nationalPhoneNumber,places.websiteUri,places.googleMapsUri';
+let googleWarned = false;
+const normAddr = x => (x || '').toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss').replace(/strasse|str\./g, 'str').replace(/[^a-z0-9]/g, '');
+async function googleSearch(s) {
+  const body = { textQuery: [s.kunde, s.strasse, [s.plz, s.ort].filter(Boolean).join(' ')].filter(Boolean).join(', '), languageCode: 'de', regionCode: 'DE', pageSize: 5,
+    locationBias: { circle: { center: { latitude: s.geo.lat, longitude: s.geo.lon }, radius: 500 } } };
+  const r = await fetch('https://places.googleapis.com/v1/places:searchText', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': settings.googleKey, 'X-Goog-FieldMask': G_FIELDS }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status; try { msg = (await r.json()).error?.message || msg; } catch { }
+    const e = new Error(msg); e.status = r.status; throw e;
+  }
+  const places = (await r.json()).places || [];
+  let best = null;
+  const street = normAddr(s.strasse);
+  for (const p of places) {
+    if (!p.location) continue;
+    const d = distM(s.geo, { lat: p.location.latitude, lon: p.location.longitude });
+    const sc = nameScore(s.kunde, { name: p.displayName?.text || '' }, s.ort);
+    const sameAddr = street && normAddr(p.formattedAddress).includes(street);
+    let conf = null, rank = 0;
+    if (sc >= 0.6 && d <= 500) { conf = 'name'; rank = 2 + sc - d / 5000; }
+    else if (d <= 60 || (sameAddr && d <= 150)) { conf = 'address'; rank = 1 - d / 1000; }   // Treffer nur über die Adresse
+    if (!conf) continue;
+    if (p.regularOpeningHours) rank += 0.1;
+    if (!best || rank > best.rank) best = { rank, p, d, conf };
+  }
+  if (!best) return null;
+  const p = best.p;
+  return { status: 'found', source: 'google', confidence: best.conf, name: p.displayName?.text || '', address: p.formattedAddress || '',
+    periods: p.regularOpeningHours?.periods || null, weekday: p.regularOpeningHours?.weekdayDescriptions || null,
+    current: p.currentOpeningHours?.periods || null, oh: (p.regularOpeningHours?.periods || p.currentOpeningHours?.periods) ? 'google' : '',
+    phone: p.nationalPhoneNumber || '', website: p.websiteUri || '', gmaps: p.googleMapsUri || '', dist: Math.round(best.d), ts: Date.now() };
+}
+// Google-Perioden (day 0 = Sonntag) als Objekt mit derselben Schnittstelle wie opening_hours.js
+function googleOH(h) {
+  const reg = h.periods || [];
+  const cur = (h.current || []).filter(p => p.open?.date);
+  const curDays = new Set(cur.map(p => `${p.open.date.year}-${p.open.date.month}-${p.open.date.day}`));
+  const fetched = new Date(h.ts); fetched.setHours(0, 0, 0, 0);
+  const inCurRange = d => cur.length && d >= fetched && d < new Date(fetched.getTime() + 7 * 864e5);
+  const at = (d, t) => { const x = new Date(d); x.setHours(t?.hour || 0, t?.minute || 0, 0, 0); return x; };
+  function dayIntervals(day) {          // Intervalle, die an diesem Kalendertag beginnen
+    const out = [];
+    if (inCurRange(day)) {
+      for (const p of cur) {
+        const o = p.open.date; if (o.year !== day.getFullYear() || o.month !== day.getMonth() + 1 || o.day !== day.getDate()) continue;
+        const a = at(day, p.open); let b;
+        if (p.close?.date) b = at(new Date(p.close.date.year, p.close.date.month - 1, p.close.date.day), p.close); else b = new Date(a.getTime() + 7 * 864e5);
+        out.push([a, b]);
+      }
+      return out;   // für diesen Tag gelten die aktuellen Zeiten (inkl. Feiertage); keine Einträge = geschlossen
+    }
+    for (const p of reg) {
+      if (p.open?.day !== day.getDay()) continue;
+      const a = at(day, p.open);
+      if (!p.close) { out.push([a, new Date(a.getTime() + 7 * 864e5)]); continue; }   // 24/7
+      let off = (p.close.day - p.open.day + 7) % 7; const b0 = at(day, p.close);
+      if (off === 0 && b0 <= a) off = 7;
+      out.push([a, new Date(b0.getTime() + off * 864e5)]);
+    }
+    return out;
+  }
+  function intervals(from, to) {
+    const res = []; const d = new Date(from); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 7);
+    for (; d < to; d.setDate(d.getDate() + 1)) for (const [a, b] of dayIntervals(new Date(d))) if (b > from && a < to) res.push([a < from ? new Date(from) : a, b > to ? new Date(to) : b]);
+    res.sort((x, y) => x[0] - y[0]);
+    const merged = []; for (const iv of res) { const l = merged[merged.length - 1]; if (l && iv[0] <= l[1]) { if (iv[1] > l[1]) l[1] = iv[1]; } else merged.push([iv[0], iv[1]]); }
+    return merged;
+  }
+  return {
+    getOpenIntervals: (from, to) => intervals(from, to).map(([a, b]) => [a, b, false, '']),
+    getState: t => intervals(new Date(t.getTime() - 1), new Date(t.getTime() + 1)).length > 0,
+    getNextChange: t => {
+      const iv = intervals(t, new Date(t.getTime() + 8 * 864e5));
+      if (!iv.length) return undefined;
+      return iv[0][0] <= t ? iv[0][1] : iv[0][0];
+    }
+  };
+}
 let hoursBusy = false; const hoursRetries = {};
 async function fetchHoursForResult(res, force) {
   if (hoursBusy) return; hoursBusy = true;
@@ -659,30 +741,49 @@ async function fetchHoursForResult(res, force) {
     }
     if (need.length) {
       need.forEach(s => s.hours = { status: 'loading' }); renderResult();
-      try {
-        let left = need;
+      let osmNeed = need;
+      if (settings.googleKey) {
+        osmNeed = [];
+        let gBlocked = false;
+        for (const s of need) {
+          if (s.gTried || gBlocked) { osmNeed.push(s); continue; }          // höchstens eine Google-Suche je Stopp und Tour
+          try {
+            const h = await googleSearch(s); s.gTried = true;
+            if (h && h.oh) { s.hours = h; hoursCache[hoursKey(s)] = h; renderResult(); }
+            else { if (h) s.gNoHours = h; osmNeed.push(s); }   // Google-Treffer ohne Zeiten: OSM versuchen, Telefon/Web behalten
+          } catch (e) {
+            console.warn('Google Places', e.status || '', e.message);
+            if (!googleWarned) { googleWarned = true; toast('Google-Suche fehlgeschlagen: ' + e.message + ' – nutze OpenStreetMap.', 6000); }
+            if (e.status === 400 || e.status === 403) gBlocked = true;   // Schlüssel ungültig/gesperrt: in diesem Durchlauf nicht weiter versuchen
+            osmNeed.push(s);
+          }
+        }
+        LS.set('tp_hours', hoursCache); saveResult(res);
+      }
+      if (osmNeed.length) try {
+        let left = osmNeed;
         for (const r of [200, 600]) {
           if (!left.length) break;
           const found = await searchHours(left, r);
           for (const [s, h] of found) { s.hours = h; hoursCache[hoursKey(s)] = h; }
           left = left.filter(s => !found.has(s));
         }
-        for (const s of left) { s.hours = { status: 'none', ts: Date.now() }; hoursCache[hoursKey(s)] = s.hours; }
+        for (const s of left) { s.hours = s.gNoHours || { status: 'none', ts: Date.now() }; hoursCache[hoursKey(s)] = s.hours; }
         LS.set('tp_hours', hoursCache);
       } catch (e) {
         console.warn('Overpass', e);
-        for (const s of need) {
+        for (const s of osmNeed) {
           if (s.hours?.status !== 'loading') continue;
-          try { const h = await nominatimPOI(s); s.hours = h || { status: 'error' }; if (h) hoursCache[hoursKey(s)] = h; }
+          try { const h = await nominatimPOI(s); s.hours = h || s.gNoHours || { status: 'error' }; if (h) hoursCache[hoursKey(s)] = h; }
           catch { s.hours = { status: 'error' }; }
           renderResult();
         }
         LS.set('tp_hours', hoursCache);
         // Overpass-Server sind oft überlastet: später automatisch erneut versuchen
-        if (need.some(s => s.hours?.status === 'error') && (hoursRetries[res.id] = (hoursRetries[res.id] || 0) + 1) <= 4) setTimeout(() => { if (state.result?.id === res.id) fetchHoursForResult(state.result); }, 45000 * hoursRetries[res.id]);
+        if (osmNeed.some(s => s.hours?.status === 'error') && (hoursRetries[res.id] = (hoursRetries[res.id] || 0) + 1) <= 4) setTimeout(() => { if (state.result?.id === res.id) fetchHoursForResult(state.result); }, 45000 * hoursRetries[res.id]);
       }
     }
-    if (res.stops.some(s => s.hours?.oh)) await loadOH().catch(e => console.warn(e));
+    if (res.stops.some(s => s.hours?.oh && s.hours.source !== 'google')) await loadOH().catch(e => console.warn(e));
     saveResult(res);
   } finally { hoursBusy = false; renderResult(); }
 }
@@ -700,10 +801,18 @@ function hoursHtml(s, sched, res) {
   if (!h || h.status === 'loading') return `<div class="oh muted">🕘 Öffnungszeiten werden gesucht …</div>`;
   if (h.status === 'error') return `<div class="oh muted">🕘 Keine Öffnungszeiten gefunden – OSM-Server gerade überlastet, es wird automatisch erneut gesucht. <button class="link" data-act="retryhours">Jetzt erneut suchen</button> · ${glink}</div>`;
   const extra = [h.phone ? `<a href="tel:${esc(h.phone.replace(/[^+\d]/g, ''))}">📞 ${esc(h.phone)}</a>` : '', h.website ? `<a href="${esc(/^https?:/.test(h.website) ? h.website : 'https://' + h.website)}" target="_blank" rel="noopener">🌐 Webseite</a>` : ''].filter(Boolean).join(' · ');
+  let glink2 = '', lowConf = '';
   if (h.status === 'none' || !h.oh) {
+    if (h.source === 'google') return `<div class="oh muted">🕘 Keine Öffnungszeiten bei Google (${esc(h.name)}) · ${h.gmaps ? `<a href="${esc(h.gmaps)}" target="_blank" rel="noopener">In Google Maps öffnen</a>` : glink}${extra ? '<br>' + extra : ''}</div>`;
     return `<div class="oh muted">🕘 Keine Öffnungszeiten gefunden${h.status === 'found' ? ` (OSM: ${esc(h.name)})` : ''} · ${glink}${extra ? '<br>' + extra : ''}</div>`;
   }
-  const oh = makeOH(h.oh, s);
+  const isG = h.source === 'google';
+  const oh = isG ? googleOH(h) : makeOH(h.oh, s);
+  if (isG) {
+    const gl = h.gmaps ? `<a href="${esc(h.gmaps)}" target="_blank" rel="noopener">In Google Maps öffnen</a>` : glink;
+    glink2 = `${esc(h.name)} · Quelle: Google${h.confidence === 'address' ? ' (nur Adress-Treffer)' : ''} · ${gl}`;
+    lowConf = h.confidence === 'address' ? `<div class="lowconf">Nur über die Adresse gefunden: „${esc(h.name)}“ – bitte prüfen</div>` : '';
+  }
   if (!oh) return `<div class="oh">🕘 ${esc(h.oh)}<br><span class="muted">(${esc(h.name)} · OSM) · ${glink}</span>${extra ? '<br>' + extra : ''}</div>`;
   const day = tourDate(res); const dayRef = sched && !sched.done && sched.arr ? new Date(sched.arr) : day; dayRef.setHours(0, 0, 0, 0);
   let warn = '';
@@ -719,8 +828,8 @@ function hoursHtml(s, sched, res) {
   const mon = new Date(dayRef); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7));
   const week = [...Array(7)].map((_, i) => { const d = new Date(mon); d.setDate(mon.getDate() + i); const cur = d.getTime() === dayRef.getTime();
     return `<tr class="${cur ? 'cur' : ''}"><td>${WD[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}.</td><td>${fmtIntervals(oh, d)}</td></tr>`; }).join('');
-  return `<details class="oh${warn ? ' warnbox' : ''}"><summary>🕘 ${WD[dayRef.getDay()]}: <b>${fmtIntervals(oh, dayRef)}</b>${warn ? `<div class="ohwarn">${warn}</div>` : ''}</summary>
-    <table class="week">${week}</table><div class="muted small">${esc(h.name)} · Quelle: <a href="${esc(h.osm)}" target="_blank" rel="noopener">OpenStreetMap</a> · ${glink}</div>${extra ? `<div class="small">${extra}</div>` : ''}</details>`;
+  return `<details class="oh${warn ? ' warnbox' : ''}"><summary>🕘 ${WD[dayRef.getDay()]}: <b>${fmtIntervals(oh, dayRef)}</b>${lowConf}${warn ? `<div class="ohwarn">${warn}</div>` : ''}</summary>
+    <table class="week">${week}</table><div class="muted small">${glink2 || `${esc(h.name)} · Quelle: <a href="${esc(h.osm)}" target="_blank" rel="noopener">OpenStreetMap</a> · ${glink}`}</div>${extra ? `<div class="small">${extra}</div>` : ''}</details>`;
 }
 
 function saveResult(res) {
@@ -889,6 +998,8 @@ function bind() {
     else if (act === 'open' && t) { state.result = t; saveState(); renderResult(); fetchHoursForResult(t); $('#resultSection').scrollIntoView({ behavior: 'smooth' }); }
   });
   $('#coordLinks').checked = !!settings.coordLinks;
+  $('#googleKey').value = settings.googleKey || '';
+  $('#toggleKey').addEventListener('click', () => { const i = $('#googleKey'); i.type = i.type === 'password' ? 'text' : 'password'; });
   $('#defStart').value = settings.startTime || '05:30'; $('#defOnsite').value = settings.onsite ?? 5;
   renderDriverFields();
   $('#addDriver').addEventListener('click', () => { collectDriverFields(); settings.drivers.push({ name: '', address: '', lat: null, lon: null }); renderDriverFields(true); });
@@ -905,16 +1016,20 @@ function bind() {
     if (!settings.drivers.length) return toast('Bitte mindestens einen Fahrer eintragen.');
     if (!settings.drivers.some(d => d.name === settings.defaultDriver)) settings.defaultDriver = settings.drivers[0].name;
     settings.coordLinks = $('#coordLinks').checked;
+    const newKey = $('#googleKey').value.trim();
+    if (newKey !== (settings.googleKey || '')) { settings.googleKey = newKey; googleWarned = false; if (state.result) state.result.stops.forEach(x => { x.gTried = false; if (x.hours && x.hours.source !== 'google') x.hours = null; }); hoursCache = {}; LS.set('tp_hours', {}); }
     settings.startTime = $('#defStart').value || '05:30';
     settings.onsite = Math.max(0, parseInt($('#defOnsite').value, 10) || 0);
     saveSettingsLS(); if (!getDriver() || !settings.drivers.some(d => d.name === state.driver)) state.driver = getDriver().name;
-    state.result = null; saveState(); renderDriverFields(); renderDriver(); renderResult(); toast('Gespeichert');
+    saveState(); renderDriverFields(); renderDriver(); renderResult(); toast('Gespeichert');
+    window.dispatchEvent(new Event('tp-settings-saved'));
   });
   $('#clearCache').addEventListener('click', () => { geoCache = {}; LS.set('tp_geocache', {}); state.stops.forEach(s => { s.geo = null; s.geoErr = null; }); saveState(); renderStops(); toast('Adress-Cache geleert'); });
 }
 
 bind(); render();
 if (state.result) fetchHoursForResult(state.result);
+window.addEventListener('tp-settings-saved', () => { if (state.result) fetchHoursForResult(state.result); });
 if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => d.name).join(', '), 4000);
 else if (!getDriver()) openSettings();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});

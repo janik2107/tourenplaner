@@ -80,6 +80,10 @@
       <label class="field">Standard-Abfahrt<input type="time" id="defStart"></label>
       <label class="field">Minuten vor Ort je Stopp<input type="number" id="defOnsite" min="0" max="600" inputmode="numeric"></label>
     </div>
+    <label class="field">Google-Schlüssel (Places API, optional)
+      <div class="keyrow"><input type="password" id="googleKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="nur auf diesem Gerät gespeichert"><button class="btn small secondary" type="button" id="toggleKey">👁</button></div>
+    </label>
+    <p class="note">Mit Schlüssel kommen Öffnungszeiten, Telefon und Webseite zuerst von Google, sonst aus OpenStreetMap.</p>
     <label class="check"><input type="checkbox" id="coordLinks"> Navigationslinks mit Koordinaten statt Adressen</label>
     <div class="actions">
       <button class="btn secondary" id="saveSettings">Speichern</button>
