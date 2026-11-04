@@ -564,7 +564,7 @@ function makeOH(str, s) {
 }
 // Namensvergleich: Rechtsformen und Füllwörter ignorieren
 const LEGAL = new Set(['gmbh', 'mbh', 'co', 'kg', 'ohg', 'ag', 'ug', 'gbr', 'ek', 'e', 'k', 'inh', 'inhaber', 'und', 'u', 'haftungsbeschraenkt', 'niederlassung', 'filiale', 'der', 'die', 'das', 'am', 'an', 'in']);
-const WEAK = new Set(['autohaus', 'auto', 'autos', 'automobile', 'automobil', 'kfz', 'service', 'center', 'centrum', 'zentrum', 'werkstatt', 'handel', 'gruppe', 'technik', 'soehne', 'sohn', 'waren', 'fahrzeuge', 'fahrzeug', 'cars', 'car', 'motors', 'motor', 'partner']);
+const WEAK = new Set(['autohaus', 'auto', 'autos', 'automobile', 'automobil', 'kfz', 'service', 'center', 'centrum', 'zentrum', 'werkstatt', 'handel', 'gruppe', 'technik', 'soehne', 'sohn', 'waren', 'fahrzeuge', 'fahrzeug', 'cars', 'car', 'motors', 'motor', 'partner', 'firma']);
 function toks(x) {
   return (x || '').toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
     .replace(/e\.\s?k\./g, ' ').replace(/[^a-z0-9]+/g, ' ').split(' ').filter(t => t.length >= 2 && !LEGAL.has(t));
@@ -587,6 +587,9 @@ function nameScore(kunde, tags, ort) {
     }
     let sc = tot ? hit / tot : 0;
     if (strongTot && !strongHit) sc = 0;
+    // umgekehrt: steckt der kürzere Ortsname vollständig im Kundennamen? (z. B. „Autohaus Schöne Aussicht“)
+    const nStrong = nt.filter(t => !WEAK.has(t) && !weakLocal.has(t));
+    if (nStrong.length >= 2 && nStrong.every(t => ct.some(c => tokEq(c, t)))) sc = Math.max(sc, 0.8);
     best = Math.max(best, sc);
   }
   return best;
