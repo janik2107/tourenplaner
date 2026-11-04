@@ -30,7 +30,7 @@ h2{font-size:20px;margin:0;font-weight:600}
 .link{background:none;border:0;color:var(--blue);font:15px var(--font);padding:0;cursor:pointer}
 .link.danger{color:var(--red)}
 .manual{margin-top:10px;display:flex;flex-direction:column;gap:8px}
-textarea,input:not([type=checkbox]){width:100%;background:var(--card2);color:var(--text);border:0;border-radius:10px;padding:10px;font:16px var(--font)}
+textarea,input:not([type=checkbox]):not([type=radio]){width:100%;background:var(--card2);color:var(--text);border:0;border-radius:10px;padding:10px;font:16px var(--font)}
 textarea:focus,input:focus{outline:2px solid var(--blue)}
 .status{margin-top:12px}
 .status-text{font-size:14px;color:var(--sub);margin-bottom:6px}
