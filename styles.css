@@ -157,3 +157,4 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .nitem .a{color:var(--sub);font-size:13px}
 .nitem .ntext{white-space:pre-wrap;font-size:14px;color:#ffe680;margin-top:4px}
 .nitem textarea{margin:6px 0;font-size:16px}
+.onsite{white-space:nowrap}
