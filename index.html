@@ -57,6 +57,7 @@
 
   <section class="group" id="resultSection" hidden>
     <div class="group-head"><h2>Tour</h2><span class="sub" id="resultMeta"></span></div>
+    <button type="button" class="btn printbtn" id="printRoute">Als PDF drucken</button>
     <div class="totals" id="totals"></div>
     <div class="tourctl" id="tourCtl"></div>
     <div class="nextbox" id="nextBox" hidden></div>
@@ -109,6 +110,7 @@
   <button class="btn primary big" id="planBtn">Tour planen</button>
 </div>
 <div id="toast" class="toast" hidden></div>
+<div id="printSheet" class="print-sheet" aria-hidden="true"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

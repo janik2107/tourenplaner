@@ -21,4 +21,4 @@ mit `{"drivers":[{"name","address","lat","lon"}],"default":"Name"}`. Der Link wi
 4. Nach ca. 1 Min. erreichbar unter `https://<benutzername>.github.io/tourenplaner/`.
 5. Auf dem iPhone in Safari öffnen → Teilen → „Zum Home-Bildschirm“.
 
-Nach Änderungen `VERSION` in `sw.js` erhöhen, damit Geräte die neue Version laden.
+Nach Änderungen `VERSION` in `sw.js` und `app.js` auf denselben Wert erhöhen (z. B. `tp-v10`), damit Geräte die neue Version laden.
