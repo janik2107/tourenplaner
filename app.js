@@ -1,5 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
+const VERSION = 'tp-v10';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -938,6 +939,296 @@ function hoursHtml(s, sched, res) {
     <table class="week">${week}</table><div class="muted small">${glink2 || `${esc(h.name)} · Quelle: <a href="${esc(h.osm)}" target="_blank" rel="noopener">OpenStreetMap</a> · ${glink}`}</div>${extra ? `<div class="small">${extra}</div>` : ''}</details>`;
 }
 
+function hoursLines(s, sched, res) {
+  const h = s.hours;
+  if (!h || h.status === 'loading') return ['Öffnungszeiten werden gesucht …'];
+  if (h.status === 'error') return ['Keine Öffnungszeiten gefunden'];
+  if (h.status === 'none' || !h.oh) {
+    const who = h && h.name ? ` (${h.name})` : '';
+    return [`Keine Öffnungszeiten${h && (h.status === 'found' || (h.source === 'google' && h.name)) ? who : ''}`];
+  }
+  const isG = h.source === 'google';
+  const oh = isG ? googleOH(h) : makeOH(h.oh, s);
+  if (!oh) return [h.oh && h.oh !== 'google' ? `Öffnungszeiten: ${h.oh}` : 'Keine Öffnungszeiten gefunden'];
+  const day = tourDate(res);
+  const dayRef = sched && !sched.done && sched.arr ? new Date(sched.arr) : new Date(day);
+  dayRef.setHours(0, 0, 0, 0);
+  const lines = [`Öffnungszeiten ${WD[dayRef.getDay()]}: ${fmtIntervals(oh, dayRef)}`];
+  if (isG && h.confidence === 'address' && h.name) lines.push(`Nur über die Adresse gefunden: „${h.name}“ – bitte prüfen`);
+  if (sched && !sched.done && sched.arr) {
+    try {
+      const open = oh.getState(sched.arr), nx = oh.getNextChange(sched.arr);
+      if (!open) {
+        const sameDay = nx && nx.toDateString() === sched.arr.toDateString();
+        lines.push(`Hinweis: Ankunft ${hhmm(sched.arr)} – ${sameDay ? 'öffnet erst um ' + hhmm(nx) : 'an diesem Tag geschlossen'}`);
+      } else if (nx && nx < sched.dep) lines.push(`Hinweis: Schließt um ${hhmm(nx)} – vor der geplanten Abfahrt ${hhmm(sched.dep)}`);
+    } catch { }
+  }
+  return lines;
+}
+function visibleNote(s, i) {
+  if (noteEdit === 'route|' + i) {
+    const ta = document.querySelector(`[data-note="${CSS.escape('route|' + i)}"] textarea`);
+    if (ta) return ta.value.replace(/\s+$/, '').trim();
+  }
+  const n = findNote(s);
+  return n && n.text ? String(n.text).trim() : '';
+}
+function routeSheet(res) {
+  const S = computeSchedule(res);
+  const doneN = res.stops.filter(s => s.done).length;
+  const blocks = [];
+  const startLines = [];
+  if (res.home && res.home.addr) startLines.push({ k: 'addr', t: res.home.addr });
+  startLines.push({ k: 'time', t: 'Abfahrt ' + (res.startTime || settings.startTime || '–') });
+  blocks.push({ kicker: 'Start', lines: startLines });
+  res.stops.forEach((s, i) => {
+    const r = S.rows[i] || {};
+    const leg = (res.legs && res.legs[i]) || { dur: 0, dist: 0 };
+    const ord = [s.auftrag || 'ohne Nr.'];
+    if (s.kategorie) ord.push(s.kategorie);
+    if (s.typ && /termin/i.test(s.typ)) ord.push(s.typ);
+    const lines = [];
+    if (r.done) lines.push({ k: 'time', t: 'Erledigt um ' + hhmm(r.dep) });
+    else lines.push({ k: 'time', t: (i === S.next ? 'Als Nächstes · ' : '') + 'Ankunft ca. ' + hhmm(r.arr) + ' · weiter ' + hhmm(r.dep) });
+    lines.push({ k: 'ord', t: ord.join(' · ') });
+    if (s.kunde) lines.push({ k: 'name', t: s.kunde });
+    lines.push({ k: 'addr', t: addrText(s) || 'keine Adresse' });
+    lines.push({ k: 'muted', t: 'Anfahrt ' + fmtMin(leg.dur) + ' · ' + fmtKm(leg.dist) });
+    const note = visibleNote(s, i);
+    if (note) lines.push({ k: 'note', t: note });
+    const hourLs = hoursLines(s, r, res);
+    const known = hourLs.some(t => t.startsWith('Öffnungszeiten'));
+    if (known || !r.done) hourLs.forEach(t => lines.push({ k: t.startsWith('Hinweis') || t.startsWith('Nur über') ? 'warn' : 'muted', t }));
+    blocks.push({ kicker: String(i + 1), lines });
+  });
+  const lb = (res.legs && res.legs[res.stops.length]) || { dur: 0, dist: 0 };
+  const endLines = [
+    { k: 'time', t: 'Zurück ca. ' + hhmm(S.homeArr) },
+    { k: 'name', t: 'Zurück nach Hause' }
+  ];
+  if (res.home && res.home.addr) endLines.push({ k: 'addr', t: res.home.addr });
+  endLines.push({ k: 'muted', t: 'Anfahrt ' + fmtMin(lb.dur) + ' · ' + fmtKm(lb.dist) });
+  blocks.push({ kicker: 'Ziel', lines: endLines });
+  return {
+    title: 'Tourenplan',
+    meta: [res.driverName || res.driver, res.datum].filter(Boolean).join(' · '),
+    sub: 'Abfahrt ' + (res.startTime || settings.startTime || '–') + ' · Zurück ca. ' + hhmm(S.homeArr),
+    totals: `${fmtKm(res.totalDist || 0)} · ${fmtMin(res.totalDur || 0)} Fahrzeit · ${doneN ? doneN + '/' : ''}${res.stops.length} ${doneN ? 'erledigt' : 'Stopps'}`,
+    foot: 'Ankunftszeiten sind Schätzungen ohne Verkehr (Fahrzeit + Zeit vor Ort).',
+    blocks
+  };
+}
+function renderSheetHtml(model) {
+  const blocks = model.blocks.map(b => `<section class="pstop"><div class="pnum">${esc(b.kicker)}</div><div class="pbody">${
+    b.lines.map(l => `<div class="p-${l.k}">${l.k === 'note' ? '<b>Notiz:</b> ' + esc(l.t) : esc(l.t)}</div>`).join('')
+  }</div></section>`).join('');
+  return `<header class="phead"><h1>${esc(model.title)}</h1><p class="pmeta">${esc(model.meta)}</p><p class="psub">${esc(model.sub)}</p><p class="ptot">${esc(model.totals)}</p></header>${blocks}<p class="pfoot">${esc(model.foot)}</p>`;
+}
+function usePdfShare() {
+  const ua = navigator.userAgent || '';
+  const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (!ios) return false;
+  return navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+}
+function routePdfName(res) {
+  const m = (res.datum || '').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+  return m ? `Tourenplan-${m[3]}-${m[2]}-${m[1]}.pdf` : 'Tourenplan.pdf';
+}
+async function printRoute() {
+  const res = state.result;
+  if (!res) return toast('Bitte zuerst eine Tour planen.');
+  const model = routeSheet(res);
+  const sheet = $('#printSheet');
+  if (sheet) sheet.innerHTML = renderSheetHtml(model);
+  if (usePdfShare()) {
+    try {
+      const blob = buildRoutePdf(model);
+      const file = new File([blob], routePdfName(res), { type: 'application/pdf' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Tourenplan' });
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      console.warn('PDF teilen', e);
+    }
+  }
+  const gen = ++printRoute.gen;
+  document.body.classList.add('printing');
+  let started = false;
+  const onBefore = () => { started = true; };
+  const onAfter = () => {
+    if (gen !== printRoute.gen) return;
+    document.body.classList.remove('printing');
+    window.removeEventListener('beforeprint', onBefore);
+    window.removeEventListener('afterprint', onAfter);
+  };
+  window.addEventListener('beforeprint', onBefore);
+  window.addEventListener('afterprint', onAfter);
+  window.print();
+  setTimeout(() => { if (!started) onAfter(); }, 1500);
+}
+printRoute.gen = 0;
+
+/* Minimales PDF (Helvetica, WinAnsi) – offline, ohne Bibliothek. Für die installierte iOS-App, in der window.print() oft nichts öffnet. */
+const PDF_W = { ' ':278,'!':278,'"':355,'#':556,'$':556,'%':889,'&':667,"'":191,'(':333,')':333,'*':389,'+':584,',':278,'-':333,'.':278,'/':278,
+  '0':556,'1':556,'2':556,'3':556,'4':556,'5':556,'6':556,'7':556,'8':556,'9':556,':':278,';':278,'<':584,'=':584,'>':584,'?':556,'@':1015,
+  'A':667,'B':667,'C':722,'D':722,'E':667,'F':611,'G':778,'H':722,'I':278,'J':500,'K':667,'L':556,'M':833,'N':722,'O':778,'P':667,'Q':778,'R':722,'S':667,'T':611,'U':722,'V':667,'W':944,'X':667,'Y':667,'Z':611,
+  'a':556,'b':556,'c':500,'d':556,'e':556,'f':278,'g':556,'h':556,'i':222,'j':222,'k':500,'l':222,'m':833,'n':556,'o':556,'p':556,'q':556,'r':333,'s':500,'t':278,'u':556,'v':500,'w':722,'x':500,'y':500,'z':500,
+  'Ä':667,'Ö':778,'Ü':722,'ä':556,'ö':556,'ü':556,'ß':611,'–':556,'—':1000,'•':350,'„':278,'“':355,'”':355,'€':556,'‘':222,'’':222 };
+const PDF_WIN = { '\u20AC':128,'\u201A':130,'\u201E':132,'\u2026':133,'\u2020':134,'\u2021':135,'\u02C6':136,'\u2030':137,'\u0160':138,'\u2039':139,'\u0152':140,'\u017D':142,'\u2018':145,'\u2019':146,'\u201C':147,'\u201D':148,'\u2022':149,'\u2013':150,'\u2014':151,'\u02DC':152,'\u2122':153,'\u0161':154,'\u203A':155,'\u0153':156,'\u017E':158,'\u0178':159 };
+function pdfCharWidth(ch, size, bold) {
+  const w = PDF_W[ch] ?? 520;
+  return w / 1000 * size * (bold ? 1.08 : 1);
+}
+function wrapPdf(text, size, bold, maxW) {
+  const lines = [];
+  for (const part of String(text ?? '').split('\n')) lines.push(...wrapPdfWords(part, size, bold, maxW));
+  return lines.length ? lines : [''];
+}
+function wrapPdfWords(text, size, bold, maxW) {
+  const width = s => { let w = 0; for (const ch of s) w += pdfCharWidth(ch, size, bold); return w; };
+  const lines = [];
+  let cur = '';
+  const words = String(text || '').split(/[ \t]+/).filter(Boolean);
+  if (!words.length) return [''];
+  const take = word => {
+    if (width(word) <= maxW) return word;
+    let buf = '';
+    for (const ch of word) {
+      if (buf && width(buf + ch) > maxW) { lines.push(buf); buf = ch; }
+      else buf += ch;
+    }
+    return buf;
+  };
+  for (const word of words) {
+    const part = cur ? null : take(word);
+    if (!cur) { cur = part; continue; }
+    if (width(cur + ' ' + word) <= maxW) cur += ' ' + word;
+    else { lines.push(cur); cur = take(word); }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function pdfEsc(str) {
+  let out = '';
+  for (const ch of String(str)) {
+    const cp = ch.codePointAt(0);
+    const b = cp <= 255 ? cp : PDF_WIN[ch];
+    if (b == null) continue;
+    if (b === 92 || b === 40 || b === 41) out += '\\' + String.fromCharCode(b);
+    else if (b < 32 || b > 126) out += '\\' + b.toString(8).padStart(3, '0');
+    else out += String.fromCharCode(b);
+  }
+  return out;
+}
+function pdfNum(n) { return (Math.round(n * 100) / 100).toString(); }
+function buildRoutePdf(model) {
+  const W = 595.28, H = 841.89, M = 42, bottom = 40;
+  const pages = [];
+  let ops = null, y = 0;
+  const header = [model.title, model.meta].filter(Boolean).join(' · ');
+  function draw(text, size, font, x, gap, allowBreak) {
+    const bold = font === 'F2';
+    const lines = wrapPdf(text, size, bold, Math.max(40, W - M - x));
+    const lh = Math.round(size * 1.38);
+    for (const line of lines) {
+      if (allowBreak !== false && y - lh < bottom) newPage(true);
+      ops.push({ op: 't', text: line, x, y: y - size, size, font });
+      y -= lh;
+    }
+    if (gap) y -= gap;
+  }
+  function newPage(cont) {
+    if (ops) pages.push(ops);
+    ops = [];
+    y = H - M;
+    if (cont) draw(header, 11, 'F2', M, 8, false);
+    else {
+      draw(model.title, 18, 'F2', M, 3, false);
+      if (model.meta) draw(model.meta, 13, 'F2', M, 2, false);
+      draw(model.sub, 10.5, 'F1', M, 1, false);
+      draw(model.totals, 10.5, 'F1', M, 8, false);
+    }
+  }
+  function addBlock(kicker, rows) {
+    const x = M + 46;
+    const contentW = W - M - x;
+    const prepared = rows.map(r => ({ ...r, lines: wrapPdf(r.t, r.size, !!r.bold, contentW), lh: Math.round(r.size * 1.38) }));
+    let h = 8;
+    for (const r of prepared) h += r.lines.length * r.lh + (r.gap || 0);
+    if (y - h < bottom && h < H - M - bottom - 36) newPage(true);
+    ops.push({ op: 't', text: kicker, x: M, y: y - 12, size: 11, font: 'F2' });
+    for (const r of prepared) {
+      const font = r.bold ? 'F2' : 'F1';
+      for (const line of r.lines) {
+        if (y - r.lh < bottom) newPage(true);
+        ops.push({ op: 't', text: line, x, y: y - r.size, size: r.size, font });
+        y -= r.lh;
+      }
+      if (r.gap) y -= r.gap;
+    }
+    y -= 4;
+    ops.push({ op: 'l', x1: M, y1: y, x2: W - M, y2: y });
+    y -= 8;
+  }
+  newPage(false);
+  for (const b of model.blocks) {
+    addBlock(b.kicker, b.lines.map(l => {
+      if (l.k === 'time') return { t: l.t, size: 12, bold: true, gap: 1 };
+      if (l.k === 'ord' || l.k === 'name') return { t: l.t, size: 11, bold: true };
+      if (l.k === 'note') return { t: 'Notiz: ' + l.t, size: 10, bold: false, gap: 1 };
+      if (l.k === 'warn') return { t: l.t, size: 10, bold: true };
+      return { t: l.t, size: 10, bold: false };
+    }));
+  }
+  const footLines = wrapPdf(model.foot || '', 9, false, W - 2 * M);
+  if (y - footLines.length * 13 < bottom) newPage(true);
+  for (const line of footLines) { ops.push({ op: 't', text: line, x: M, y: y - 9, size: 9, font: 'F1' }); y -= 13; }
+  if (ops) pages.push(ops);
+  pages.forEach((page, i) => {
+    const label = (i + 1) + ' / ' + pages.length;
+    let tw = 0; for (const ch of label) tw += pdfCharWidth(ch, 9, false);
+    page.push({ op: 't', text: label, x: (W - tw) / 2, y: 22, size: 9, font: 'F1' });
+  });
+  const bodies = pages.map(page => {
+    let s = '0 G 0 g\n';
+    for (const o of page) {
+      if (o.op === 't') s += `BT /${o.font} ${pdfNum(o.size)} Tf 1 0 0 1 ${pdfNum(o.x)} ${pdfNum(o.y)} Tm (${pdfEsc(o.text)}) Tj ET\n`;
+      else s += `0.65 G 0.4 w ${pdfNum(o.x1)} ${pdfNum(o.y1)} m ${pdfNum(o.x2)} ${pdfNum(o.y2)} l S 0 G\n`;
+    }
+    return s;
+  });
+  const n = pages.length;
+  const offsets = [];
+  const parts = [];
+  let pos = 0;
+  const write = s => { parts.push(s); pos += s.length; };
+  const obj = (id, body) => { offsets[id] = pos; write(id + ' 0 obj\n' + body + '\nendobj\n'); };
+  write('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+  const pageIds = [], contentIds = [];
+  let next = 5;
+  for (let i = 0; i < n; i++) { pageIds.push(next++); contentIds.push(next++); }
+  const total = next - 1;
+  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2, `<< /Type /Pages /Kids [${pageIds.map(id => id + ' 0 R').join(' ')}] /Count ${n} >>`);
+  obj(3, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+  obj(4, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+  bodies.forEach((stream, i) => {
+    obj(contentIds[i], `<< /Length ${stream.length} >>\nstream\n${stream}endstream`);
+    obj(pageIds[i], `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pdfNum(W)} ${pdfNum(H)}] /Contents ${contentIds[i]} 0 R /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>`);
+  });
+  const xref = pos;
+  write(`xref\n0 ${total + 1}\n0000000000 65535 f \n`);
+  for (let i = 1; i <= total; i++) write(String(offsets[i]).padStart(10, '0') + ' 00000 n \n');
+  write(`trailer << /Size ${total + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
+  const raw = parts.join('');
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i) & 255;
+  return new Blob([bytes], { type: 'application/pdf' });
+}
+
 function saveResult(res) {
   res = res || state.result; if (!res) return;
   res.updated = Date.now();
@@ -1084,6 +1375,9 @@ function bind() {
     saveState(); renderStops(); renderResult();
   });
   $('#planBtn').addEventListener('click', plan);
+  $('#printRoute').addEventListener('click', () => {
+    printRoute().catch(e => { if (e && e.name === 'AbortError') return; console.error(e); toast('Drucken fehlgeschlagen'); });
+  });
   $('#stopList').addEventListener('focusout', handleNoteBlur);
   $('#routeList').addEventListener('focusout', handleNoteBlur);
   $('#notesList').addEventListener('click', e => {
@@ -1160,5 +1454,5 @@ if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => 
 else if (!getDriver()) openSettings();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // für Tests
-window.TP = { notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan };
+window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan, routeSheet, buildRoutePdf, printRoute };
 window.addEventListener('hashchange', () => { if (/[#&]setup=/.test(location.hash)) location.reload(); });
