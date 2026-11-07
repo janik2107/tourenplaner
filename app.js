@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v10';
+const VERSION = 'tp-v11';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -23,28 +23,38 @@ let settings = Object.assign({}, DEFAULT_SETTINGS, LS.get('tp_settings', {}));
 if (!Array.isArray(settings.drivers)) settings.drivers = [];
 const saveSettingsLS = () => LS.set('tp_settings', settings);
 
-// Einmaliger Einrichtungslink: #setup=<base64url(JSON)>  → in localStorage speichern, dann aus der Adresszeile entfernen
+// Hash-Links: #setup= und #tour= sind base64url(UTF-8-JSON). Nach dem Lesen aus der Adresszeile entfernen.
+function decodeHashJson(raw) {
+  let b = raw.replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '=';
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b), c => c.charCodeAt(0))));
+}
 let setupApplied = false;
+let tourHashSeen = false, tourHashBad = false, tourHashPayload;
 (function applySetupFromHash() {
-  const m = location.hash.match(/[#&]setup=([A-Za-z0-9_\-]+=*)/);
-  if (!m) return;
-  try {
-    let b = m[1].replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '=';
-    const json = new TextDecoder().decode(Uint8Array.from(atob(b), c => c.charCodeAt(0)));
-    const cfg = JSON.parse(json);
-    const drivers = (cfg.drivers || []).filter(d => d && d.name).map(d => ({
-      name: String(d.name), address: String(d.address || ''),
-      lat: d.lat != null && d.lat !== '' ? +d.lat : null, lon: d.lon != null && d.lon !== '' ? +d.lon : null }));
-    if (drivers.length) {
-      settings.drivers = drivers;
-      settings.defaultDriver = drivers.some(d => d.name === cfg.default) ? cfg.default : drivers[0].name;
-      if (typeof cfg.googleKey === 'string' && cfg.googleKey.trim()) settings.googleKey = cfg.googleKey.trim();
-      saveSettingsLS();
-      const st = LS.get('tp_state', {}); st.driver = settings.defaultDriver; st.result = null; LS.set('tp_state', st);
-      setupApplied = true;
-    }
-  } catch (e) { console.warn('Setup-Link ungültig', e); }
-  history.replaceState(null, '', location.pathname + location.search);
+  const setupM = location.hash.match(/[#&]setup=([A-Za-z0-9_\-]+=*)/);
+  const tourM = location.hash.match(/[#&]tour=([A-Za-z0-9_\-]+=*)/);
+  if (setupM) {
+    try {
+      const cfg = decodeHashJson(setupM[1]);
+      const drivers = (cfg.drivers || []).filter(d => d && d.name).map(d => ({
+        name: String(d.name), address: String(d.address || ''),
+        lat: d.lat != null && d.lat !== '' ? +d.lat : null, lon: d.lon != null && d.lon !== '' ? +d.lon : null }));
+      if (drivers.length) {
+        settings.drivers = drivers;
+        settings.defaultDriver = drivers.some(d => d.name === cfg.default) ? cfg.default : drivers[0].name;
+        if (typeof cfg.googleKey === 'string' && cfg.googleKey.trim()) settings.googleKey = cfg.googleKey.trim();
+        saveSettingsLS();
+        const st = LS.get('tp_state', {}); st.driver = settings.defaultDriver; st.result = null; LS.set('tp_state', st);
+        setupApplied = true;
+      }
+    } catch (e) { console.warn('Setup-Link ungültig', e); }
+  }
+  if (tourM) {
+    tourHashSeen = true;
+    try { tourHashPayload = decodeHashJson(tourM[1]); }
+    catch (e) { tourHashBad = true; console.warn('Tour-Link ungültig', e); }
+  }
+  if (setupM || tourM) history.replaceState(null, '', location.pathname + location.search);
 })();
 
 let state = Object.assign({ driver: null, stops: [], firstId: null, result: null, editing: null }, LS.get('tp_state', {}));
@@ -1012,7 +1022,7 @@ function routeSheet(res) {
   blocks.push({ kicker: 'Ziel', lines: endLines });
   return {
     title: 'Tourenplan',
-    meta: [res.driverName || res.driver, res.datum].filter(Boolean).join(' · '),
+    meta: [res.name, res.driverName || res.driver, res.datum].filter(Boolean).join(' · '),
     sub: 'Abfahrt ' + (res.startTime || settings.startTime || '–') + ' · Zurück ca. ' + hhmm(S.homeArr),
     totals: `${fmtKm(res.totalDist || 0)} · ${fmtMin(res.totalDur || 0)} Fahrzeit · ${doneN ? doneN + '/' : ''}${res.stops.length} ${doneN ? 'erledigt' : 'Stopps'}`,
     foot: 'Ankunftszeiten sind Schätzungen ohne Verkehr (Fahrzeit + Zeit vor Ort).',
@@ -1243,7 +1253,7 @@ function renderResultInner() {
   sec.hidden = false;
   const S = computeSchedule(res);
   const doneN = res.stops.filter(s => s.done).length;
-  $('#resultMeta').textContent = `${res.driverName} · ${res.datum}`;
+  $('#resultMeta').textContent = res.name ? (res.datum ? `${res.name} · ${res.datum}` : res.name) : `${res.driverName} · ${res.datum}`;
   $('#totals').innerHTML = `<div><b>${fmtKm(res.totalDist)}</b><span>Strecke</span></div><div><b>${fmtMin(res.totalDur).replace(' Min.', ' m').replace(' Std.', ' h')}</b><span>Fahrzeit</span></div><div><b>${doneN ? doneN + '/' : ''}${res.stops.length}</b><span>${doneN ? 'erledigt' : 'Stopps'}</span></div>`;
   $('#tourCtl').innerHTML = `<label>Abfahrt <input type="time" id="tourStart" value="${esc(res.startTime || settings.startTime)}"></label><span>Zurück ca. <b>${hhmm(S.homeArr)}</b></span>`;
   const pts = routePoints(res);
@@ -1290,14 +1300,15 @@ function shortName(p, res) {
   const s = res.stops.find(x => addrText(x) === p.addr); if (!s) return p.addr; const k = s.kunde.length > 22 ? s.kunde.slice(0, 21) + '…' : s.kunde; return (s.auftrag ? s.auftrag + ' · ' : '') + s.ort + (k ? ` (${k})` : '');
 }
 function renderMap(res) {
-  if (typeof L === 'undefined') { $('#map').hidden = true; return; }
+  const ll = [[res.home?.lat, res.home?.lon], ...res.stops.map(s => [s.geo?.lat, s.geo?.lon])];
+  if (typeof L === 'undefined' || ll.some(([a, b]) => !Number.isFinite(a) || !Number.isFinite(b))) { $('#map').hidden = true; return; }
+  $('#map').hidden = false;
   if (!map) {
     map = L.map('map', { zoomControl: false, attributionControl: true });
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
   }
   if (mapLayer) mapLayer.remove();
   mapLayer = L.layerGroup().addTo(map);
-  const ll = [[res.home.lat, res.home.lon], ...res.stops.map(s => [s.geo.lat, s.geo.lon])];
   if (res.geometry) L.polyline(res.geometry, { color: '#0a84ff', weight: 4, opacity: .9 }).addTo(mapLayer);
   else L.polyline([...ll, ll[0]], { color: '#0a84ff', weight: 3, dashArray: '6 6' }).addTo(mapLayer);
   L.marker(ll[0], { icon: L.divIcon({ className: 'num-marker home', html: '⌂' }) }).addTo(mapLayer);
@@ -1307,8 +1318,10 @@ function renderMap(res) {
 function renderTours() {
   const ul = $('#tourList');
   if (!tours.length) { ul.innerHTML = '<li class="empty">Noch keine Touren geplant.</li>'; return; }
-  ul.innerHTML = tours.map(t => { const dn = t.stops.filter(s => s.done).length; return `<li class="tour" data-tid="${t.id}">
-    <div><div class="t">${esc(t.driverName)} · ${esc(t.datum)}</div><div class="s">${t.stops.length} Stopps${dn ? ` (${dn} erledigt)` : ''} · ${fmtKm(t.totalDist)} · ${fmtMin(t.totalDur)}</div>
+  ul.innerHTML = tours.map(t => { const dn = t.stops.filter(s => s.done).length;
+    const title = t.name ? (t.datum ? `${esc(t.name)} · ${esc(t.datum)}` : esc(t.name)) : `${esc(t.driverName)} · ${esc(t.datum)}`;
+    return `<li class="tour" data-tid="${t.id}">
+    <div><div class="t">${title}</div><div class="s">${t.stops.length} Stopps${dn ? ` (${dn} erledigt)` : ''} · ${fmtKm(t.totalDist)} · ${fmtMin(t.totalDur)}</div>
     <div class="s ords">Aufträge: ${t.stops.map(s => esc(s.auftrag || '–')).join(', ')}</div></div>
     <div style="display:flex;gap:6px"><button class="btn small secondary" data-act="open">Öffnen</button><button class="icon del" data-act="deltour" aria-label="Löschen">✕</button></div></li>`; }).join('');
 }
@@ -1447,12 +1460,135 @@ function bind() {
   $('#clearCache').addEventListener('click', () => { geoCache = {}; LS.set('tp_geocache', {}); state.stops.forEach(s => { s.geo = null; s.geoErr = null; }); saveState(); renderStops(); toast('Adress-Cache geleert'); });
 }
 
+// #tour=<base64url(JSON)> ergänzt oder ersetzt genau eine gespeicherte Tour. Andere lokale Daten bleiben.
+// Formen: {name, tour:{…}}, gespeicherte Tour {stops, home}, oder {name, stops} ohne fertige Tour.
+let tourLoadNotice = null;
+function applyTourFromHash() {
+  if (!tourHashSeen) return;
+  if (tourHashBad) { tourLoadNotice = { ok: false }; return; }
+  try {
+    const tour = tourFromHashPayload(tourHashPayload);
+    if (!tour) throw new Error('kein Tour-Objekt');
+    if (!Array.isArray(tours)) tours = [];
+    const name = tour.name || '';
+    let idx = tour.id ? tours.findIndex(t => t && String(t.id) === String(tour.id)) : -1;
+    if (idx < 0 && name) idx = tours.findIndex(t => t && String(t.name || '').trim() === name);
+    if (idx >= 0) tours[idx] = tour;
+    else { tours.unshift(tour); tours = tours.slice(0, 20); }
+    LS.set('tp_tours', tours);
+    state.result = tour;
+    saveState();
+    tourLoadNotice = { ok: true, name: name || tour.driverName || 'Tour', n: tour.stops.length };
+  } catch (e) {
+    console.warn('Tour-Link ungültig', e);
+    tourLoadNotice = { ok: false };
+  }
+}
+function tourFromHashPayload(cfg) {
+  if (!isObj(cfg)) return null;
+  const wrapName = cleanName(cfg.name);
+  if (isObj(cfg.tour)) {
+    const nm = wrapName || cleanName(cfg.tour.name);
+    return fullTourOrNull(cfg.tour, nm) || (Array.isArray(cfg.tour.stops) ? lightTourOrNull(cfg.tour.stops, nm, cfg.tour) : null);
+  }
+  if (Array.isArray(cfg.stops) && isObj(cfg.home)) return fullTourOrNull(cfg, wrapName);
+  if (Array.isArray(cfg.stops)) return lightTourOrNull(cfg.stops, wrapName, cfg);
+  return null;
+}
+function isObj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+function cleanName(v) { const s = v == null ? '' : String(v).trim(); return s || null; }
+function numOrNull(v) { if (v == null || v === '') return null; const n = +v; return Number.isFinite(n) ? n : null; }
+const txt = v => v == null ? '' : String(v);
+function normalizeStops(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const s of list) {
+    if (!isObj(s)) continue;
+    const geo = normalizeGeo(s.geo) || normalizeGeo(s);
+    const done = s.done != null && s.done !== '' && typeof s.done !== 'boolean' && Number.isFinite(+s.done) ? +s.done : null;
+    out.push({
+      auftrag: txt(s.auftrag), kategorie: txt(s.kategorie), datum: txt(s.datum), kunde: txt(s.kunde),
+      plz: txt(s.plz), ort: txt(s.ort), strasse: txt(s.strasse), typ: txt(s.typ), betrag: txt(s.betrag),
+      geo, onsite: s.onsite != null && s.onsite !== '' && Number.isFinite(+s.onsite) ? +s.onsite : null, done
+    });
+  }
+  return out;
+}
+function normalizeGeo(g) {
+  if (!isObj(g)) return null;
+  const lat = numOrNull(g.lat), lon = numOrNull(g.lon);
+  if (lat == null || lon == null) return null;
+  const geo = { lat, lon };
+  if (g.approx != null) geo.approx = !!g.approx;
+  if (g.label != null) geo.label = String(g.label);
+  if (g.state != null) geo.state = String(g.state);
+  return geo;
+}
+function normalizeLegs(legs) {
+  if (!Array.isArray(legs)) return [];
+  return legs.map(l => ({ dur: Number(l && l.dur) || 0, dist: Number(l && l.dist) || 0 }));
+}
+function normalizeGeometry(g) {
+  if (!Array.isArray(g) || !g.length) return null;
+  const pts = [];
+  for (const p of g) {
+    if (!Array.isArray(p) || p.length < 2 || !Number.isFinite(+p[0]) || !Number.isFinite(+p[1])) return null;
+    pts.push([+p[0], +p[1]]);
+  }
+  return pts;
+}
+function fullTourOrNull(src, name) {
+  if (!isObj(src) || !Array.isArray(src.stops) || !isObj(src.home)) return null;
+  const stops = normalizeStops(src.stops);
+  if (!stops.length) return null;
+  const legs = normalizeLegs(src.legs);
+  const driverName = cleanName(src.driverName) || cleanName(src.driver) || '';
+  const driver = cleanName(src.driver) || driverName;
+  const tour = {
+    id: cleanName(src.id) || uid(),
+    created: Number.isFinite(+src.created) ? +src.created : Date.now(),
+    driver, driverName,
+    datum: cleanName(src.datum) || (stops.find(s => s.datum) || {}).datum || '',
+    home: { addr: txt(src.home.addr), lat: numOrNull(src.home.lat), lon: numOrNull(src.home.lon), approx: !!src.home.approx },
+    stops, legs, geometry: normalizeGeometry(src.geometry),
+    startTime: cleanName(src.startTime) || settings.startTime || '05:30',
+    totalDur: Number.isFinite(+src.totalDur) ? +src.totalDur : legs.reduce((a, l) => a + l.dur, 0),
+    totalDist: Number.isFinite(+src.totalDist) ? +src.totalDist : legs.reduce((a, l) => a + l.dist, 0)
+  };
+  if (name) tour.name = name;
+  return tour;
+}
+function lightTourOrNull(stopsRaw, name, src) {
+  const stops = normalizeStops(stopsRaw);
+  if (!stops.length) return null;
+  src = isObj(src) ? src : {};
+  const driverName = cleanName(src.driverName) || cleanName(src.driver) || '';
+  const driver = cleanName(src.driver) || driverName;
+  const tour = {
+    id: cleanName(src.id) || uid(),
+    created: Number.isFinite(+src.created) ? +src.created : Date.now(),
+    driver, driverName,
+    datum: cleanName(src.datum) || (stops.find(s => s.datum) || {}).datum || '',
+    home: { addr: '', lat: null, lon: null, approx: false },
+    stops, legs: [], geometry: null,
+    startTime: cleanName(src.startTime) || settings.startTime || '05:30',
+    totalDur: 0, totalDist: 0
+  };
+  if (name) tour.name = name;
+  return tour;
+}
+
+applyTourFromHash();
 bind(); render();
 if (state.result) fetchHoursForResult(state.result);
 window.addEventListener('tp-settings-saved', () => { if (state.result) fetchHoursForResult(state.result); });
-if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => d.name).join(', '), 4000);
+if (tourLoadNotice) {
+  const n = tourLoadNotice.n;
+  toast(tourLoadNotice.ok ? `Route „${tourLoadNotice.name}“ geladen: ${n} ${n === 1 ? 'Stopp' : 'Stopps'}` : 'Tour-Link ungültig', 4000);
+  if (tourLoadNotice.ok) $('#resultSection').scrollIntoView({ behavior: 'smooth' });
+} else if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => d.name).join(', '), 4000);
 else if (!getDriver()) openSettings();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 // für Tests
 window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan, routeSheet, buildRoutePdf, printRoute };
-window.addEventListener('hashchange', () => { if (/[#&]setup=/.test(location.hash)) location.reload(); });
+window.addEventListener('hashchange', () => { if (/[#&](setup|tour)=/.test(location.hash)) location.reload(); });
