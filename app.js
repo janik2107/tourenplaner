@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v12';
+const VERSION = 'tp-v13';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -304,9 +304,9 @@ function matchesArea(hit, a) {
   }
   return !a.plz && !a.ort;
 }
-async function geocode(a) {
+async function geocode(a, opt) {
   const key = addrText(a).toLowerCase().replace(/\s+/g, ' ');
-  if (geoCache[key]) return geoCache[key];
+  if (!(opt && opt.fresh) && geoCache[key]) return geoCache[key];
   const street = expandStreet(a.strasse || '');
   const tries = [];
   if (street) {
@@ -436,7 +436,7 @@ async function plan() {
     let legs, geometry = null;
     try { const r = await osrmRoute(seqPts); legs = r.legs; geometry = r.geometry; }
     catch { legs = []; let p = 0; for (const i of [...order, 0]) { legs.push({ dur: T.dur[p][i], dist: T.dist[p][i] }); p = i; } }
-    const ordered = order.map(i => { const s = stops[i - 1]; return { auftrag: s.auftrag, kategorie: s.kategorie, datum: s.datum, kunde: s.kunde, plz: s.plz, ort: s.ort, strasse: s.strasse, typ: s.typ, betrag: s.betrag, geo: s.geo }; });
+    const ordered = order.map(i => { const s = stops[i - 1]; return { id: s.id, auftrag: s.auftrag, kategorie: s.kategorie, datum: s.datum, kunde: s.kunde, plz: s.plz, ort: s.ort, strasse: s.strasse, typ: s.typ, betrag: s.betrag, geo: s.geo }; });
     const datum = (stops.find(s => s.datum) || {}).datum || new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const result = {
       id: uid(), created: Date.now(), driver: drv.name, driverName: drv.name, datum,
@@ -465,9 +465,92 @@ function locStr(p) {
   if (settings.coordLinks && p.lat != null) return `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
   return p.addr + ', Deutschland';
 }
+function finiteNum(v) {
+  if (v == null || v === '') return null;
+  const n = +v;
+  return Number.isFinite(n) ? n : null;
+}
+function hasPos(p) {
+  if (!p) return false;
+  const lat = finiteNum(p.lat), lon = finiteNum(p.lon);
+  return lat != null && lon != null && !!(lat || lon);
+}
+// res.dest ist optional. Fehlt es, ist das Ziel gleich dem Start (bisheriges Verhalten).
+function hasExplicitDest(res) {
+  const d = res && res.dest;
+  return !!(d && (String(d.addr || '').trim() || hasPos(d)));
+}
+function routeStart(res) {
+  const h = (res && res.home) || {};
+  return { addr: h.addr || '', lat: finiteNum(h.lat), lon: finiteNum(h.lon), approx: !!h.approx };
+}
+function routeEnd(res) {
+  if (hasExplicitDest(res)) {
+    const d = res.dest;
+    return { addr: d.addr || '', lat: finiteNum(d.lat), lon: finiteNum(d.lon), approx: !!d.approx };
+  }
+  return routeStart(res);
+}
+function pointLabel(p) {
+  if (!p) return '';
+  const addr = String(p.addr || '').trim();
+  if (addr) return addr;
+  if (hasPos(p)) return finiteNum(p.lat).toFixed(5) + ', ' + finiteNum(p.lon).toFixed(5);
+  return '';
+}
 function routePoints(res) {
-  const home = { addr: res.home.addr, lat: res.home.lat, lon: res.home.lon };
-  return [home, ...res.stops.map(s => ({ addr: addrText(s), lat: s.geo?.lat, lon: s.geo?.lon })), home];
+  const start = routeStart(res), end = routeEnd(res);
+  return [
+    { addr: pointLabel(start), lat: start.lat, lon: start.lon },
+    ...res.stops.map(s => ({ addr: addrText(s), lat: s.geo?.lat, lon: s.geo?.lon })),
+    { addr: pointLabel(end), lat: end.lat, lon: end.lon }
+  ];
+}
+function parseCoordPair(text) {
+  const m = String(text || '').trim().match(/^(-?\d{1,3}(?:\.\d+)?)\s*[,;]\s*(-?\d{1,3}(?:\.\d+)?)$/);
+  if (!m) return null;
+  const lat = +m[1], lon = +m[2];
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || (!lat && !lon)) return null;
+  return { lat, lon };
+}
+async function locateManual(addr, coordsText) {
+  const typedCoords = String(coordsText || '').trim();
+  if (typedCoords) {
+    const coords = parseCoordPair(typedCoords);
+    if (!coords) { const err = new Error('Koordinaten nicht erkannt. Beispiel: 51.0504, 13.7373'); err.user = true; throw err; }
+    const label = String(addr || '').trim() || (coords.lat.toFixed(5) + ', ' + coords.lon.toFixed(5));
+    return { addr: label, lat: coords.lat, lon: coords.lon, approx: false };
+  }
+  const text = String(addr || '').trim();
+  if (!text) return null;
+  const asCoords = parseCoordPair(text);
+  if (asCoords) return { addr: text, lat: asCoords.lat, lon: asCoords.lon, approx: false };
+  const parsed = parseManualLine(text) || { strasse: '', plz: '', ort: text };
+  const geo = await geocode(parsed, { fresh: true });
+  if (!geo) return null;
+  return { addr: text, lat: geo.lat, lon: geo.lon, approx: !!geo.approx };
+}
+async function recomputeLegs(res) {
+  const pts = routePoints(res);
+  if (pts.length < 2 || pts.some(p => !hasPos(p))) return false;
+  const raw = pts.map(p => ({ lat: finiteNum(p.lat), lon: finiteNum(p.lon) }));
+  let legs, geometry;
+  try {
+    const r = await osrmRoute(raw);
+    legs = r.legs; geometry = r.geometry;
+  } catch {
+    try {
+      const T = await osrmTable(raw);
+      legs = [];
+      for (let i = 0; i < raw.length - 1; i++) legs.push({ dur: T.dur[i][i + 1] || 0, dist: T.dist[i][i + 1] || 0 });
+      geometry = null;
+    } catch { return false; }
+  }
+  res.legs = legs;
+  res.geometry = geometry;
+  res.totalDur = legs.reduce((a, l) => a + (Number(l.dur) || 0), 0);
+  res.totalDist = legs.reduce((a, l) => a + (Number(l.dist) || 0), 0);
+  return true;
 }
 function chunk(points, maxWp) {
   // teilt Punkte in Abschnitte mit max. maxWp Zwischenzielen; Abschnitte überlappen am Übergabepunkt
@@ -1002,7 +1085,8 @@ function routeSheet(res) {
   const doneN = res.stops.filter(s => s.done).length;
   const blocks = [];
   const startLines = [];
-  if (res.home && res.home.addr) startLines.push({ k: 'addr', t: res.home.addr });
+  const startLabel = pointLabel(routeStart(res));
+  if (startLabel) startLines.push({ k: 'addr', t: startLabel });
   startLines.push({ k: 'time', t: 'Abfahrt ' + (res.startTime || settings.startTime || '–') });
   blocks.push({ kicker: 'Start', lines: startLines });
   res.stops.forEach((s, i) => {
@@ -1026,11 +1110,13 @@ function routeSheet(res) {
     blocks.push({ kicker: String(i + 1), lines });
   });
   const lb = (res.legs && res.legs[res.stops.length]) || { dur: 0, dist: 0 };
+  const customEnd = hasExplicitDest(res);
+  const endLabel = pointLabel(routeEnd(res));
   const endLines = [
-    { k: 'time', t: 'Zurück ca. ' + hhmm(S.homeArr) },
-    { k: 'name', t: 'Zurück nach Hause' }
+    { k: 'time', t: (customEnd ? 'Ziel ca. ' : 'Zurück ca. ') + hhmm(S.homeArr) },
+    { k: 'name', t: customEnd ? 'Ziel' : 'Zurück nach Hause' }
   ];
-  if (res.home && res.home.addr) endLines.push({ k: 'addr', t: res.home.addr });
+  if (endLabel) endLines.push({ k: 'addr', t: endLabel });
   endLines.push({ k: 'muted', t: 'Anfahrt ' + fmtMin(lb.dur) + ' · ' + fmtKm(lb.dist) });
   blocks.push({ kicker: 'Ziel', lines: endLines });
   return {
@@ -1258,11 +1344,181 @@ function saveResult(res) {
   const i = tours.findIndex(t => t.id === res.id); if (i >= 0) tours[i] = res; LS.set('tp_tours', tours);
   if (state.result && state.result.id === res.id) { state.result = res; saveState(); }
 }
+function geoFailToast(e) {
+  const msg = e && (e.user || /nicht gefunden|Bitte|Koordinaten/.test(e.message || '')) ? e.message : 'Adresse konnte nicht gesucht werden. Bitte später noch einmal.';
+  toast(msg, 6000);
+}
+function syncSourceStop(before, after, placeChanged) {
+  let match = null;
+  if (before.id) match = state.stops.find(s => s && s.id === before.id) || null;
+  if (!match && before.auftrag) {
+    const hits = state.stops.filter(s => s && s.auftrag === before.auftrag);
+    if (hits.length === 1) match = hits[0];
+  }
+  if (!match) match = state.stops.find(s => s && s.strasse === before.strasse && s.plz === before.plz && s.ort === before.ort && (s.kunde || '') === (before.kunde || '')) || null;
+  if (!match) return;
+  match.kunde = after.kunde; match.strasse = after.strasse; match.plz = after.plz; match.ort = after.ort;
+  match.auftrag = after.auftrag; match.kategorie = after.kategorie;
+  if (placeChanged) { match.geo = after.geo || null; match.geoErr = after.geo ? null : 'Adresse nicht gefunden'; }
+}
+function resetPlannedRoute() {
+  if (!state.result || routeSaving) return;
+  if (!confirm('Angezeigte Route zurücksetzen? Danach kannst du neu planen. Gespeicherte Touren, Kunden, Notizen und Fahrer bleiben erhalten.')) return;
+  state.result = null;
+  routeEdit = null; routeEditTour = null;
+  saveState();
+  renderResult();
+  toast('Route zurückgesetzt. Aufträge, Touren, Notizen und Fahrer bleiben. Unten auf „Tour planen“ tippen.');
+  const list = $('#stopList');
+  if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+async function saveEndpoint(box) {
+  if (routeSaving || !state.result) return;
+  const kind = box.dataset.end;
+  if (kind !== 'start' && kind !== 'dest') return;
+  const addr = box.querySelector('[name=addr]')?.value || '';
+  const coords = box.querySelector('[name=coords]')?.value || '';
+  if (!String(addr).trim() && !String(coords).trim()) {
+    toast(kind === 'start' ? 'Bitte eine Startadresse eingeben.' : 'Bitte eine Zieladresse eingeben.');
+    return;
+  }
+  routeSaving = true;
+  const btn = box.querySelector('[data-act=saveend]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Suche …'; }
+  try {
+    const point = await locateManual(addr, coords);
+    if (!point) throw Object.assign(new Error(kind === 'start' ? 'Startadresse nicht gefunden – bitte genauer eingeben.' : 'Zieladresse nicht gefunden – bitte genauer eingeben.'), { user: true });
+    const res = state.result;
+    let keptDest = hasExplicitDest(res);
+    if (kind === 'start') {
+      // Ziel merken, damit ein neuer Start das bisherige Ziel nicht mit verschiebt.
+      if (!keptDest) {
+        const prev = routeStart(res);
+        if (prev.addr || hasPos(prev)) {
+          res.dest = { addr: prev.addr || '', lat: prev.lat, lon: prev.lon, approx: !!prev.approx };
+          keptDest = true;
+        }
+      }
+      res.home = Object.assign({}, res.home, { addr: point.addr, lat: point.lat, lon: point.lon, approx: !!point.approx });
+    } else {
+      res.dest = Object.assign({}, res.dest, { addr: point.addr, lat: point.lat, lon: point.lon, approx: !!point.approx });
+    }
+    const ok = await recomputeLegs(res);
+    routeEdit = null; mapFor = null;
+    saveResult();
+    renderResult();
+    const msg = !ok ? 'Adresse gespeichert. Die Fahrzeit konnte nicht neu berechnet werden.'
+      : kind === 'dest' ? 'Ziel gespeichert. Der Start bleibt, wie es ist.'
+      : keptDest ? 'Start gespeichert. Das Ziel bleibt, wie es ist.'
+      : 'Start gespeichert.';
+    toast(msg, ok ? 4000 : 6000);
+    if (point.approx) toast('Hinweis: nur ungefähr gefunden (PLZ/Ort).', 5000);
+  } catch (e) {
+    geoFailToast(e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Übernehmen'; }
+  } finally { routeSaving = false; }
+}
+async function saveRouteStop(li) {
+  if (routeSaving || !state.result) return;
+  const s = state.result.stops[+li.dataset.i];
+  const box = li.querySelector('[data-route-edit]');
+  if (!s || !box) return;
+  const next = {};
+  box.querySelectorAll('input').forEach(inp => { if (inp.name) next[inp.name] = inp.value.trim(); });
+  const before = { id: s.id, kunde: s.kunde, strasse: s.strasse, plz: s.plz, ort: s.ort, auftrag: s.auftrag, kategorie: s.kategorie };
+  const addrChanged = addrText(before) !== addrText(next);
+  const coordsText = next.coords || '';
+  if (!addrText(next) && !coordsText) { toast('Bitte eine Adresse eingeben.'); return; }
+  routeSaving = true;
+  const btn = box.querySelector('[data-act=savestop]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Suche …'; }
+  try {
+    let geo = s.geo, placeChanged = false;
+    if (coordsText) {
+      const coords = parseCoordPair(coordsText);
+      if (!coords) throw Object.assign(new Error('Koordinaten nicht erkannt. Beispiel: 51.0504, 13.7373'), { user: true });
+      geo = { lat: coords.lat, lon: coords.lon, approx: false, label: addrText(next) };
+      placeChanged = true;
+    } else if (addrChanged) {
+      geo = await geocode({ strasse: next.strasse, plz: next.plz, ort: next.ort }, { fresh: true });
+      if (!geo) throw Object.assign(new Error('Adresse nicht gefunden – bitte Straße, PLZ und Ort prüfen.'), { user: true });
+      placeChanged = true;
+    }
+    s.kunde = next.kunde; s.strasse = next.strasse; s.plz = next.plz; s.ort = next.ort;
+    s.auftrag = next.auftrag; s.kategorie = next.kategorie;
+    if (placeChanged) { s.geo = geo; s.hours = null; s.gTried = false; delete s.gNoHours; }
+    syncSourceStop(before, s, placeChanged);
+    const ok = placeChanged ? await recomputeLegs(state.result) : true;
+    routeEdit = null; mapFor = null;
+    saveResult();
+    renderStops();
+    renderResult();
+    if (placeChanged && state.result) fetchHoursForResult(state.result);
+    toast(ok ? 'Stopp gespeichert. Die Reihenfolge bleibt.' : 'Stopp gespeichert. Die Fahrzeit konnte nicht neu berechnet werden.', ok ? 4000 : 6000);
+    if (placeChanged && geo && geo.approx) toast('Hinweis: nur ungefähr gefunden (PLZ/Ort).', 5000);
+  } catch (e) {
+    geoFailToast(e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Übernehmen'; }
+  } finally { routeSaving = false; }
+}
 
-function renderResult() { keepNoteEditing(renderResultInner); }
+let routeEdit = null;      // 'start' | 'dest' | 'stop|<i>' – nur die Ansicht, wird nicht gespeichert
+let routeEditTour = null;
+let routeSaving = false;
+function keepRouteEditing(fn) {
+  const box = routeEdit ? document.querySelector('[data-route-edit]') : null;
+  const vals = {};
+  if (box) box.querySelectorAll('input').forEach(i => { if (i.name) vals[i.name] = i.value; });
+  const active = document.activeElement;
+  const activeName = active && box && box.contains(active) && active.name ? active.name : '';
+  const sel = activeName ? [active.selectionStart, active.selectionEnd] : null;
+  fn();
+  if (!routeEdit || !box) return;
+  const nbox = document.querySelector('[data-route-edit]');
+  if (!nbox) return;
+  nbox.querySelectorAll('input').forEach(i => { if (i.name in vals) i.value = vals[i.name]; });
+  if (activeName) {
+    const n = nbox.querySelector(`[name="${CSS.escape(activeName)}"]`);
+    if (n) { n.focus(); try { if (sel) n.setSelectionRange(sel[0], sel[1]); } catch { } }
+  }
+}
+function focusRouteEdit() {
+  setTimeout(() => { const el = document.querySelector('[data-route-edit] input'); if (el) el.focus(); }, 0);
+}
+function endpointBlock(kind, res) {
+  const p = kind === 'start' ? routeStart(res) : routeEnd(res);
+  const label = pointLabel(p);
+  const title = kind === 'start' ? 'Start' : 'Ziel';
+  const action = label ? `${title} ändern` : `${title} hinzufügen`;
+  const editing = routeEdit === kind;
+  const warn = p && p.approx ? '<div class="tags"><span class="tag warn">nur ungefähr gefunden</span></div>' : '';
+  const form = `<div class="edit" data-route-edit>
+      <input class="full" name="addr" placeholder="Straße Nr., PLZ Ort" value="${esc(label)}">
+      <input class="full" name="coords" inputmode="decimal" placeholder="Koordinaten optional, z. B. 51.0504, 13.7373" value="">
+      <div class="row"><button type="button" class="btn small secondary" data-act="canceledit">Abbrechen</button><button type="button" class="btn small" data-act="saveend">Übernehmen</button></div>
+    </div>`;
+  return `<div class="endpoint" data-end="${kind}">
+    <div class="k">${title}</div>
+    ${editing ? form : `<div class="a">${label ? esc(label) : '<i>Keine Adresse</i>'}</div>${warn}<button type="button" class="btn editbtn" data-act="editend">${action}</button>`}
+  </div>`;
+}
+function stopEditForm(s) {
+  return `<div class="edit" data-route-edit>
+    <input class="full" name="kunde" placeholder="Kunde" value="${esc(s.kunde)}">
+    <input class="full" name="strasse" placeholder="Straße und Hausnr." value="${esc(s.strasse)}">
+    <input name="plz" placeholder="PLZ" inputmode="numeric" value="${esc(s.plz)}">
+    <input name="ort" placeholder="Ort" value="${esc(s.ort)}">
+    <input name="auftrag" placeholder="Auftrag" value="${esc(s.auftrag)}">
+    <input name="kategorie" placeholder="Kategorie" value="${esc(s.kategorie)}">
+    <input class="full" name="coords" inputmode="decimal" placeholder="Koordinaten optional, z. B. 51.0504, 13.7373" value="">
+    <div class="row"><button type="button" class="btn small secondary" data-act="canceledit">Abbrechen</button><button type="button" class="btn small" data-act="savestop">Übernehmen</button></div>
+  </div>`;
+}
+function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInner)); }
 function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
-  if (!res) { sec.hidden = true; mapFor = null; return; }
+  if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; return; }
+  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; }
   sec.hidden = false;
   const S = computeSchedule(res);
   const doneN = res.stops.filter(s => s.done).length;
@@ -1277,7 +1533,9 @@ function renderResultInner() {
       <div class="nb-eta">Ankunft ca. <b>${hhmm(r.arr)}</b></div>
       <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`;
     $('#nextBox').hidden = false;
-  } else { $('#nextBox').innerHTML = `<div class="nb-l">Alle Stopps erledigt ✓</div><div class="nb-eta">Zurück zu Hause ca. <b>${hhmm(S.homeArr)}</b></div>`; $('#nextBox').hidden = false; }
+  } else { $('#nextBox').innerHTML = `<div class="nb-l">Alle Stopps erledigt ✓</div><div class="nb-eta">Zurück ${hasExplicitDest(res) ? 'am Ziel' : 'zu Hause'} ca. <b>${hhmm(S.homeArr)}</b></div>`; $('#nextBox').hidden = false; }
+  const ends = $('#endPoints');
+  if (ends) ends.innerHTML = endpointBlock('start', res) + endpointBlock('dest', res) + '<p class="note endpoints-note">Nur diese Route. Die Fahrer-Adressen in den Einstellungen bleiben unverändert.</p>';
   const g = chunk(pts, 9), a = chunk(pts, 13);
   let html = '';
   html += `<div class="row">${g.map((p, i) => `<a class="btn gmaps" target="_blank" rel="noopener" href="${esc(googleUrl(p))}">Google Maps${g.length > 1 ? ` ${i + 1}/${g.length}` : ''}</a>`).join('')}</div>`;
@@ -1289,11 +1547,13 @@ function renderResultInner() {
     const l = res.legs[i] || { dur: 0, dist: 0 }; const p = pts[i + 1], r = S.rows[i], isNext = i === S.next;
     const eta = r.done ? `<div class="eta done">✓ Erledigt um ${hhmm(r.dep)}</div>`
       : `<div class="eta">${isNext ? '<span class="nexttag">Als Nächstes</span> ' : ''}Ankunft ca. <b>${hhmm(r.arr)}</b> <span class="muted">· weiter ${hhmm(r.dep)}</span></div>`;
+    const editing = routeEdit === 'stop|' + i;
     return `<li class="stop rstop${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}"><div class="badge">${r.done ? '✓' : i + 1}</div>
       ${eta}
       <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}</div>
-      ${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
-      <div class="a">${esc(addrText(s))}</div>
+      ${editing ? stopEditForm(s) : `${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
+      <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
+      <button type="button" class="btn editbtn" data-act="editstop">Stopp korrigieren</button>`}
       <div class="leg">🚗 ${fmtMin(l.dur)} · ${fmtKm(l.dist)} Anfahrt</div>
       ${noteHtml(s, 'route|' + i)}
       ${r.done ? '' : hoursHtml(s, r, res)}
@@ -1304,8 +1564,10 @@ function renderResultInner() {
     </li>`;
   });
   const lb = res.legs[res.stops.length] || { dur: 0, dist: 0 };
-  rows.push(`<li class="stop rstop"><div class="badge" style="background:var(--green);color:#000">⌂</div><div class="eta">Zurück ca. <b>${hhmm(S.homeArr)}</b></div><div class="k">Zurück nach Hause</div><div class="a">${esc(res.home.addr)}</div><div class="leg">🚗 ${fmtMin(lb.dur)} · ${fmtKm(lb.dist)}</div>
-    <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(pts[0]))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(pts[0]))}">Apple Karten</a></div></li>`);
+  const endPt = pts[pts.length - 1];
+  const endTitle = hasExplicitDest(res) ? 'Ziel' : 'Zurück nach Hause';
+  rows.push(`<li class="stop rstop"><div class="badge" style="background:var(--green);color:#000">${hasExplicitDest(res) ? 'Z' : '⌂'}</div><div class="eta">${hasExplicitDest(res) ? 'Ziel ca.' : 'Zurück ca.'} <b>${hhmm(S.homeArr)}</b></div><div class="k">${endTitle}</div><div class="a">${esc(pointLabel(routeEnd(res)))}</div><div class="leg">🚗 ${fmtMin(lb.dur)} · ${fmtKm(lb.dist)}</div>
+    <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(endPt))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(endPt))}">Apple Karten</a></div></li>`);
   $('#routeList').innerHTML = rows.join('');
   if (mapFor !== res.id) { mapFor = res.id; renderMap(res); }
 }
@@ -1313,7 +1575,11 @@ function shortName(p, res) {
   const s = res.stops.find(x => addrText(x) === p.addr); if (!s) return p.addr; const k = s.kunde.length > 22 ? s.kunde.slice(0, 21) + '…' : s.kunde; return (s.auftrag ? s.auftrag + ' · ' : '') + s.ort + (k ? ` (${k})` : '');
 }
 function renderMap(res) {
-  const ll = [[res.home?.lat, res.home?.lon], ...res.stops.map(s => [s.geo?.lat, s.geo?.lon])];
+  const start = routeStart(res), end = routeEnd(res);
+  const samePoint = hasPos(start) && hasPos(end) && Math.abs(start.lat - end.lat) < 1e-5 && Math.abs(start.lon - end.lon) < 1e-5;
+  const separateEnd = hasExplicitDest(res) && hasPos(end) && !samePoint;
+  const ll = [[start.lat, start.lon], ...res.stops.map(s => [s.geo?.lat, s.geo?.lon])];
+  if (separateEnd) ll.push([end.lat, end.lon]);
   if (typeof L === 'undefined' || ll.some(([a, b]) => !Number.isFinite(a) || !Number.isFinite(b))) { $('#map').hidden = true; return; }
   $('#map').hidden = false;
   if (!map) {
@@ -1323,9 +1589,10 @@ function renderMap(res) {
   if (mapLayer) mapLayer.remove();
   mapLayer = L.layerGroup().addTo(map);
   if (res.geometry) L.polyline(res.geometry, { color: '#0a84ff', weight: 4, opacity: .9 }).addTo(mapLayer);
-  else L.polyline([...ll, ll[0]], { color: '#0a84ff', weight: 3, dashArray: '6 6' }).addTo(mapLayer);
-  L.marker(ll[0], { icon: L.divIcon({ className: 'num-marker home', html: '⌂' }) }).addTo(mapLayer);
+  else L.polyline(separateEnd ? ll : [...ll, ll[0]], { color: '#0a84ff', weight: 3, dashArray: '6 6' }).addTo(mapLayer);
+  L.marker(ll[0], { icon: L.divIcon({ className: 'num-marker home', html: separateEnd ? 'S' : '⌂' }) }).addTo(mapLayer);
   res.stops.forEach((s, i) => L.marker(ll[i + 1], { icon: L.divIcon({ className: 'num-marker', html: String(i + 1) }) }).bindPopup(esc(label(s))).addTo(mapLayer));
+  if (separateEnd) L.marker(ll[ll.length - 1], { icon: L.divIcon({ className: 'num-marker home', html: 'Z' }) }).addTo(mapLayer);
   setTimeout(() => { map.invalidateSize(); map.fitBounds(L.latLngBounds(ll), { padding: [24, 24] }); }, 50);
 }
 function renderTours() {
@@ -1404,6 +1671,15 @@ function bind() {
   $('#printRoute').addEventListener('click', () => {
     printRoute().catch(e => { if (e && e.name === 'AbortError') return; console.error(e); toast('Drucken fehlgeschlagen'); });
   });
+  $('#resetRoute').addEventListener('click', resetPlannedRoute);
+  $('#endPoints').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]'); const box = e.target.closest('[data-end]');
+    if (!b || !box || !state.result) return;
+    const act = b.dataset.act;
+    if (act === 'editend') { routeEdit = box.dataset.end; renderResult(); focusRouteEdit(); }
+    else if (act === 'canceledit') { routeEdit = null; renderResult(); }
+    else if (act === 'saveend') saveEndpoint(box);
+  });
   $('#stopList').addEventListener('focusout', handleNoteBlur);
   $('#routeList').addEventListener('focusout', handleNoteBlur);
   $('#notesList').addEventListener('click', e => {
@@ -1422,8 +1698,12 @@ function bind() {
   $('#routeList').addEventListener('click', e => {
     if (handleNoteClick(e)) return;
     const b = e.target.closest('[data-act]'); const li = e.target.closest('.rstop'); if (!b || !li || !state.result) return;
+    const act = b.dataset.act;
+    if (act === 'editstop') { routeEdit = 'stop|' + li.dataset.i; renderResult(); focusRouteEdit(); return; }
+    if (act === 'canceledit') { routeEdit = null; renderResult(); return; }
+    if (act === 'savestop') { saveRouteStop(li); return; }
     const s = state.result.stops[+li.dataset.i]; if (!s) return;
-    if (b.dataset.act === 'done') { s.done = Date.now(); toast(`${label(s)} erledigt – Zeiten neu berechnet`); }
+    if (act === 'done') { s.done = Date.now(); toast(`${label(s)} erledigt – Zeiten neu berechnet`); }
     else if (b.dataset.act === 'undo') { s.done = null; }
     else if (b.dataset.act === 'retryhours') { fetchHoursForResult(state.result, false); return; }
     else return;
@@ -1542,11 +1822,13 @@ function normalizeStops(list) {
     if (!isObj(s)) continue;
     const geo = normalizeGeo(s.geo) || normalizeGeo(s);
     const done = s.done != null && s.done !== '' && typeof s.done !== 'boolean' && Number.isFinite(+s.done) ? +s.done : null;
-    out.push({
+    const stop = {
       auftrag: txt(s.auftrag), kategorie: txt(s.kategorie), datum: txt(s.datum), kunde: txt(s.kunde),
       plz: txt(s.plz), ort: txt(s.ort), strasse: txt(s.strasse), typ: txt(s.typ), betrag: txt(s.betrag),
       geo, onsite: s.onsite != null && s.onsite !== '' && Number.isFinite(+s.onsite) ? +s.onsite : null, done
-    });
+    };
+    if (s.id != null && String(s.id).trim()) stop.id = String(s.id).trim();
+    out.push(stop);
   }
   return out;
 }
@@ -1592,6 +1874,13 @@ function fullTourOrNull(src, name) {
     totalDist: Number.isFinite(+src.totalDist) ? +src.totalDist : legs.reduce((a, l) => a + l.dist, 0)
   };
   if (name) tour.name = name;
+  return attachDest(tour, src);
+}
+function attachDest(tour, src) {
+  if (!isObj(src) || !isObj(src.dest)) return tour;
+  const dAddr = txt(src.dest.addr).trim();
+  const dLat = numOrNull(src.dest.lat), dLon = numOrNull(src.dest.lon);
+  if (dAddr || (dLat != null && dLon != null)) tour.dest = { addr: txt(src.dest.addr), lat: dLat, lon: dLon, approx: !!src.dest.approx };
   return tour;
 }
 function lightTourOrNull(stopsRaw, name, src) {
@@ -1611,7 +1900,7 @@ function lightTourOrNull(stopsRaw, name, src) {
     totalDur: 0, totalDist: 0
   };
   if (name) tour.name = name;
-  return tour;
+  return attachDest(tour, src);
 }
 
 (async function boot() {
@@ -1626,6 +1915,6 @@ function lightTourOrNull(stopsRaw, name, src) {
   else if (!getDriver()) openSettings();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
   // für Tests
-  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan, routeSheet, buildRoutePdf, printRoute };
+  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, tours: () => tours, handleFiles, plan, routeSheet, buildRoutePdf, printRoute, resetPlannedRoute, routeStart, routeEnd, render: () => render() };
   window.addEventListener('hashchange', () => { if (/[#&](setup|tour)=/.test(location.hash)) location.reload(); });
 })();

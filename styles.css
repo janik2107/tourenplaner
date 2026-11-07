@@ -158,8 +158,17 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .nitem .ntext{white-space:pre-wrap;font-size:14px;color:#ffe680;margin-top:4px}
 .nitem textarea{margin:6px 0;font-size:16px}
 .onsite{white-space:nowrap}
-.printbtn{width:100%;margin:2px 0 14px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
-.printbtn:active{background:#e5e5ea}
+.printbtn{width:100%;margin:2px 0 10px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
+.printbtn:active,.resetbtn:active,.editbtn:active{background:#e5e5ea}
+.resetbtn{width:100%;margin:0 0 12px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
+.endpoints-note{margin-top:0}
+.endpoint{background:var(--card2);border-radius:12px;padding:12px;margin:0 0 10px}
+.endpoint .k{font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
+.endpoint .a{font-size:17px;color:var(--text);margin-top:2px}
+.endpoint .a i{color:var(--sub);font-style:normal}
+.endpoint .tags{margin-top:6px}
+.editbtn{width:100%;margin-top:10px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:14px 14px;border-radius:12px}
+.endpoint .edit{margin-top:8px}
 .print-sheet{display:none}
 #printSheet .p-note{white-space:pre-wrap}
 /* Sichtbar machen, bevor window.print() läuft. iOS Safari druckt Elemente nicht, die nur im Print-Stylesheet von display:none auf block wechseln. */
