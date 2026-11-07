@@ -175,6 +175,10 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .savebtn{width:100%;margin:0 0 8px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
 .savebtn:active{background:#e5e5ea}
 .discardbtn{width:100%;margin:0 0 12px}
+.picklist{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.pickstop{appearance:none;width:100%;text-align:left;background:#fff;color:#000;border:0;border-radius:12px;padding:14px;font:17px/1.3 var(--font);cursor:pointer}
+.pickstop .pick-k{display:block;font-weight:800}
+.pickstop .pick-a{display:block;color:#3a3a3c;font-size:15px;font-weight:500}
 .firststop{margin:0 0 12px}
 .firststop .k{font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
 .firststop .who{font-size:18px;font-weight:700;margin-top:2px}

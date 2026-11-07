@@ -1,5 +1,5 @@
 // Tourenplaner Service Worker: App-Dateien offline, CDN-Bibliotheken im Cache
-const VERSION = 'tp-v19';
+const VERSION = 'tp-v20';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'unpkg.com', 'tessdata.projectnaptha.com'];

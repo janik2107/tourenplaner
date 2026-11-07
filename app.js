@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v19';
+const VERSION = 'tp-v20';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1452,12 +1452,14 @@ function abandonDraft() {
   draftId = null;
   draftSnapshot = null;
   draftUndo = new Set();
+  pickFirst = false;
 }
 function beginDraft(saved) {
   if (!saved) return;
   draftSnapshot = cloneTour(saved);
   draftId = saved.id;
   draftUndo = new Set();
+  pickFirst = false;
   state.result = cloneTour(saved);
   routeEdit = null;
   saveState();
@@ -1626,6 +1628,7 @@ async function saveRouteStop(li) {
 }
 
 let routeEdit = null;      // 'start' | 'dest' | 'stop|<i>' – nur die Ansicht, wird nicht gespeichert
+let pickFirst = false;
 let routeEditTour = null;
 let routeSaving = false;
 function keepRouteEditing(fn) {
@@ -1686,25 +1689,86 @@ function openStopEdit(index) {
   if (row) row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 function editFirstStop() {
-  if (!state.result || !state.result.stops || !state.result.stops.length) {
-    if (state.result) toast('Diese Tour hat keinen Stopp.');
-    return;
-  }
-  openStopEdit(0);
+  if (!state.result || !state.result.stops || state.result.stops.length < 2) return;
+  pickFirst = true;
+  renderResult();
+  const host = $('#firstStop');
+  if (host) host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 function firstStopBox(res) {
   const host = $('#firstStop');
   if (!host) return;
-  const s = res && res.stops && res.stops[0];
-  if (!s) { host.innerHTML = ''; return; }
+  const stops = res && res.stops || [];
+  const s = stops[0];
+  if (!s) { host.innerHTML = ''; pickFirst = false; return; }
   const who = s.kunde || s.auftrag || 'Stopp 1';
+  const canSwitch = stops.length > 1;
+  if (!canSwitch) pickFirst = false;
+  const choices = pickFirst ? stops.slice(1).map((x, i) => `<button type="button" class="pickstop" data-act="pickfirst" data-pick="${i + 1}">
+      <span class="pick-k">${esc(x.kunde || x.auftrag || ('Stopp ' + (i + 2)))}</span>
+      <span class="pick-a">${esc(addrText(x)) || 'keine Adresse'}</span>
+    </button>`).join('') : '';
   host.innerHTML = `<div class="firststop">
     <div class="k">Erster Stopp</div>
     <div class="who">${esc(who)}</div>
     <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
-    <button type="button" class="btn firstbtn" data-act="editfirst">Ersten Stopp bearbeiten</button>
-    <p class="note">Der erste Kunde. Nicht die Startadresse. In der Liste nach rechts wischen.</p>
+    ${canSwitch && !pickFirst ? `<button type="button" class="btn firstbtn" data-act="editfirst">Ersten Stopp wechseln</button>
+      <p class="note">Anderen Kunden als ersten Stopp wählen. Start und Ziel bleiben.</p>` : ''}
+    ${pickFirst ? `<p class="note">Neuen ersten Stopp wählen.</p><div class="picklist">${choices}
+      <button type="button" class="btn secondary discardbtn" data-act="pickcancel">Abbrechen</button></div>` : ''}
   </div>`;
+}
+async function makeFirstStop(index) {
+  const res = state.result;
+  if (routeSaving || !res || !res.stops || index < 1 || index >= res.stops.length) return;
+  const home = routeStart(res), goal = routeEnd(res);
+  if (!hasPos(home) || !hasPos(goal) || res.stops.some(s => !s.geo || !hasPos(s.geo))) {
+    toast('Ein Stopp hat keinen Standort. Bitte die Adresse zuerst korrigieren.');
+    return;
+  }
+  const prev = res.stops.slice();
+  routeSaving = true;
+  pickFirst = false;
+  const planBtn = $('#planBtn');
+  if (planBtn) { planBtn.disabled = true; planBtn.textContent = 'Berechne Reihenfolge …'; }
+  try {
+    const endPt = { lat: +goal.lat, lon: +goal.lon };
+    const matrixPts = [endPt, ...res.stops.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon }))];
+    const T = await osrmTable(matrixPts);
+    const order = solveTour(T.dur, index + 1);
+    if (!order.length || order[0] !== index + 1) throw new Error('Reihenfolge konnte nicht berechnet werden.');
+    const ordered = order.map(i => res.stops[i - 1]);
+    if (ordered.length !== res.stops.length || ordered.some(s => !s)) throw new Error('Reihenfolge konnte nicht berechnet werden.');
+    res.stops = ordered;
+    const seq = [{ lat: +home.lat, lon: +home.lon }, ...ordered.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon })), endPt];
+    try {
+      const r = await osrmRoute(seq);
+      res.legs = r.legs;
+      res.geometry = r.geometry;
+    } catch {
+      const T2 = await osrmTable(seq);
+      res.legs = [];
+      for (let i = 0; i < seq.length - 1; i++) res.legs.push({ dur: T2.dur[i][i + 1] || 0, dist: T2.dist[i][i + 1] || 0 });
+      res.geometry = null;
+    }
+    res.totalDur = res.legs.reduce((a, l) => a + (Number(l.dur) || 0), 0);
+    res.totalDist = res.legs.reduce((a, l) => a + (Number(l.dist) || 0), 0);
+    mapFor = null;
+    routeEdit = null;
+    saveResult(res);
+    renderResult();
+    renderTours();
+    const name = ordered[0].kunde || ordered[0].auftrag || 'der neue Stopp';
+    toast(`Erster Stopp ist jetzt ${name}. Die übrige Reihenfolge ist neu berechnet.`);
+  } catch (e) {
+    res.stops = prev;
+    pickFirst = true;
+    renderResult();
+    toast(e.message || 'Reihenfolge konnte nicht berechnet werden.', 5000);
+  } finally {
+    routeSaving = false;
+    if (planBtn) { planBtn.disabled = false; planBtn.textContent = 'Tour planen'; }
+  }
 }
 async function removeRouteStop(index) {
   if (routeSaving || !state.result || !state.result.stops || !state.result.stops[index]) return;
@@ -1746,7 +1810,7 @@ function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInn
 function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
   if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; const host = $('#firstStop'); if (host) host.innerHTML = ''; const saveHost = $('#routeSave'); if (saveHost) saveHost.innerHTML = ''; return; }
-  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; }
+  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; pickFirst = false; }
   if (applyRememberedDone(res.stops)) saveResult(res);
   sec.hidden = false;
   const S = computeSchedule(res);
@@ -1975,7 +2039,9 @@ function bind() {
   $('#firstStop').addEventListener('click', e => {
     const b = e.target.closest('[data-act]');
     if (!b || !state.result) return;
-    if (b.dataset.act === 'editfirst') editFirstStop();
+    if (b.dataset.act === 'editfirst') { editFirstStop(); return; }
+    if (b.dataset.act === 'pickcancel') { pickFirst = false; renderResult(); return; }
+    if (b.dataset.act === 'pickfirst') makeFirstStop(+b.dataset.pick);
   });
   bindStopSwipe($('#routeList'));
   $('#endPoints').addEventListener('click', e => {
