@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v11';
+const VERSION = 'tp-v12';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -23,13 +23,23 @@ let settings = Object.assign({}, DEFAULT_SETTINGS, LS.get('tp_settings', {}));
 if (!Array.isArray(settings.drivers)) settings.drivers = [];
 const saveSettingsLS = () => LS.set('tp_settings', settings);
 
-// Hash-Links: #setup= und #tour= sind base64url(UTF-8-JSON). Nach dem Lesen aus der Adresszeile entfernen.
-function decodeHashJson(raw) {
+// Hash-Links: #setup= und #tour= sind base64url(UTF-8-JSON). #tour= darf zusätzlich gzip-komprimiert sein (Magic 1f 8b).
+// Nach dem Lesen aus der Adresszeile entfernen. #setup= bleibt unkomprimiertes JSON.
+function hashBytes(raw) {
   let b = raw.replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '=';
-  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b), c => c.charCodeAt(0))));
+  return Uint8Array.from(atob(b), c => c.charCodeAt(0));
+}
+function decodeHashJson(raw) {
+  return JSON.parse(new TextDecoder().decode(hashBytes(raw)));
+}
+const isGzip = b => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
+async function gunzipJson(bytes) {
+  if (typeof DecompressionStream !== 'function') throw new Error('gzip nicht verfügbar');
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(await new Response(stream).arrayBuffer())));
 }
 let setupApplied = false;
-let tourHashSeen = false, tourHashBad = false, tourHashPayload;
+let tourHashSeen = false, tourHashBad = false, tourHashPayload, tourHashGzip = null;
 (function applySetupFromHash() {
   const setupM = location.hash.match(/[#&]setup=([A-Za-z0-9_\-]+=*)/);
   const tourM = location.hash.match(/[#&]tour=([A-Za-z0-9_\-]+=*)/);
@@ -51,8 +61,11 @@ let tourHashSeen = false, tourHashBad = false, tourHashPayload;
   }
   if (tourM) {
     tourHashSeen = true;
-    try { tourHashPayload = decodeHashJson(tourM[1]); }
-    catch (e) { tourHashBad = true; console.warn('Tour-Link ungültig', e); }
+    try {
+      const bytes = hashBytes(tourM[1]);
+      if (isGzip(bytes)) tourHashGzip = bytes;
+      else tourHashPayload = JSON.parse(new TextDecoder().decode(bytes));
+    } catch (e) { tourHashBad = true; console.warn('Tour-Link ungültig', e); }
   }
   if (setupM || tourM) history.replaceState(null, '', location.pathname + location.search);
 })();
@@ -1404,6 +1417,7 @@ function bind() {
   });
   $('#exportNotes').addEventListener('click', exportNotes);
   $('#importNotes').addEventListener('change', e => { const f = e.target.files[0]; if (f) importNotes(f); e.target.value = ''; });
+  $('#importTour').addEventListener('change', e => { const f = e.target.files[0]; if (f) importTourFile(f); e.target.value = ''; });
   renderNotesList();
   $('#routeList').addEventListener('click', e => {
     if (handleNoteClick(e)) return;
@@ -1463,25 +1477,47 @@ function bind() {
 // #tour=<base64url(JSON)> ergänzt oder ersetzt genau eine gespeicherte Tour. Andere lokale Daten bleiben.
 // Formen: {name, tour:{…}}, gespeicherte Tour {stops, home}, oder {name, stops} ohne fertige Tour.
 let tourLoadNotice = null;
-function applyTourFromHash() {
+const tourLoadedMsg = info => `Route „${info.name}“ geladen: ${info.n} ${info.n === 1 ? 'Stopp' : 'Stopps'}`;
+// Eine Tour ergänzen oder ersetzen. payload ist bereits geparstes JSON. null = ungültig, nichts geschrieben.
+function applyImportedTour(payload) {
+  const tour = tourFromHashPayload(payload);
+  if (!tour) return null;
+  if (!Array.isArray(tours)) tours = [];
+  const name = tour.name || '';
+  let idx = tour.id ? tours.findIndex(t => t && String(t.id) === String(tour.id)) : -1;
+  if (idx < 0 && name) idx = tours.findIndex(t => t && String(t.name || '').trim() === name);
+  if (idx >= 0) tours[idx] = tour;
+  else { tours.unshift(tour); tours = tours.slice(0, 20); }
+  LS.set('tp_tours', tours);
+  state.result = tour;
+  saveState();
+  return { name: name || tour.driverName || 'Tour', n: tour.stops.length };
+}
+async function applyTourFromHash() {
   if (!tourHashSeen) return;
   if (tourHashBad) { tourLoadNotice = { ok: false }; return; }
   try {
-    const tour = tourFromHashPayload(tourHashPayload);
-    if (!tour) throw new Error('kein Tour-Objekt');
-    if (!Array.isArray(tours)) tours = [];
-    const name = tour.name || '';
-    let idx = tour.id ? tours.findIndex(t => t && String(t.id) === String(tour.id)) : -1;
-    if (idx < 0 && name) idx = tours.findIndex(t => t && String(t.name || '').trim() === name);
-    if (idx >= 0) tours[idx] = tour;
-    else { tours.unshift(tour); tours = tours.slice(0, 20); }
-    LS.set('tp_tours', tours);
-    state.result = tour;
-    saveState();
-    tourLoadNotice = { ok: true, name: name || tour.driverName || 'Tour', n: tour.stops.length };
+    const payload = tourHashGzip ? await gunzipJson(tourHashGzip) : tourHashPayload;
+    const info = applyImportedTour(payload);
+    if (!info) throw new Error('kein Tour-Objekt');
+    tourLoadNotice = { ok: true, name: info.name, n: info.n };
   } catch (e) {
     console.warn('Tour-Link ungültig', e);
     tourLoadNotice = { ok: false };
+  }
+}
+async function importTourFile(file) {
+  try {
+    const data = JSON.parse(String(await file.text()).replace(/^\uFEFF/, ''));
+    const info = applyImportedTour(data);
+    if (!info) throw new Error('kein Tour-Objekt');
+    render();
+    if (state.result) fetchHoursForResult(state.result);
+    toast(tourLoadedMsg(info), 4000);
+    $('#resultSection').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) {
+    console.warn('Tour-Datei ungültig', e);
+    toast('Tour-Datei ungültig');
   }
 }
 function tourFromHashPayload(cfg) {
@@ -1578,17 +1614,18 @@ function lightTourOrNull(stopsRaw, name, src) {
   return tour;
 }
 
-applyTourFromHash();
-bind(); render();
-if (state.result) fetchHoursForResult(state.result);
-window.addEventListener('tp-settings-saved', () => { if (state.result) fetchHoursForResult(state.result); });
-if (tourLoadNotice) {
-  const n = tourLoadNotice.n;
-  toast(tourLoadNotice.ok ? `Route „${tourLoadNotice.name}“ geladen: ${n} ${n === 1 ? 'Stopp' : 'Stopps'}` : 'Tour-Link ungültig', 4000);
-  if (tourLoadNotice.ok) $('#resultSection').scrollIntoView({ behavior: 'smooth' });
-} else if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => d.name).join(', '), 4000);
-else if (!getDriver()) openSettings();
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
-// für Tests
-window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan, routeSheet, buildRoutePdf, printRoute };
-window.addEventListener('hashchange', () => { if (/[#&](setup|tour)=/.test(location.hash)) location.reload(); });
+(async function boot() {
+  await applyTourFromHash();
+  bind(); render();
+  if (state.result) fetchHoursForResult(state.result);
+  window.addEventListener('tp-settings-saved', () => { if (state.result) fetchHoursForResult(state.result); });
+  if (tourLoadNotice) {
+    toast(tourLoadNotice.ok ? tourLoadedMsg(tourLoadNotice) : 'Tour-Link ungültig', 4000);
+    if (tourLoadNotice.ok) $('#resultSection').scrollIntoView({ behavior: 'smooth' });
+  } else if (setupApplied) toast('Einrichtung übernommen: ' + settings.drivers.map(d => d.name).join(', '), 4000);
+  else if (!getDriver()) openSettings();
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  // für Tests
+  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, handleFiles, plan, routeSheet, buildRoutePdf, printRoute };
+  window.addEventListener('hashchange', () => { if (/[#&](setup|tour)=/.test(location.hash)) location.reload(); });
+})();
