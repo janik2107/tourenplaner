@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v18';
+const VERSION = 'tp-v19';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1833,7 +1833,7 @@ function datumKey(t) {
 }
 function toursForList() {
   return tours.map((t, i) => ({ t, i })).sort((a, b) => {
-    const d = datumKey(b.t) - datumKey(a.t);
+    const d = datumKey(a.t) - datumKey(b.t);
     return d || a.i - b.i;
   }).map(x => x.t);
 }
