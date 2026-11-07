@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v15';
+const VERSION = 'tp-v16';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2125,6 +2125,29 @@ function lightTourOrNull(stopsRaw, name, src) {
   if (name) tour.name = name;
   return attachDest(tour, src);
 }
+
+function lockPageZoom() {
+  const block = e => { if (e.cancelable) e.preventDefault(); };
+  document.addEventListener('gesturestart', block, { passive: false });
+  document.addEventListener('gesturechange', block, { passive: false });
+  document.addEventListener('gestureend', block, { passive: false });
+  document.addEventListener('touchmove', e => {
+    if (e.touches && e.touches.length > 1) block(e);
+  }, { passive: false });
+}
+function pinBottomBar() {
+  const apply = () => {
+    const vv = window.visualViewport;
+    const gap = vv ? Math.max(0, window.innerHeight - vv.offsetTop - vv.height) : 0;
+    document.documentElement.style.setProperty('--vv-bottom', gap + 'px');
+  };
+  apply();
+  if (!window.visualViewport) return;
+  window.visualViewport.addEventListener('resize', apply);
+  window.visualViewport.addEventListener('scroll', apply);
+}
+lockPageZoom();
+pinBottomBar();
 
 (async function boot() {
   await applyTourFromHash();
