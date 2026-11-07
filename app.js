@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v13';
+const VERSION = 'tp-v14';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -76,6 +76,75 @@ const getDriver = () => { const ds = settings.drivers.filter(d => d.name && d.ad
 if (getDriver()) state.driver = getDriver().name;
 let tours = LS.get('tp_tours', []);
 let geoCache = LS.get('tp_geocache', {});
+// Erledigt-Zeiten hängen an Auftrag und Stopp-Id, nicht nur an der gerade offenen Tour.
+let doneMemory = LS.get('tp_done', null);
+if (!doneMemory || typeof doneMemory !== 'object' || Array.isArray(doneMemory)) doneMemory = { byAuftrag: {}, byId: {} };
+if (!doneMemory.byAuftrag || typeof doneMemory.byAuftrag !== 'object' || Array.isArray(doneMemory.byAuftrag)) doneMemory.byAuftrag = {};
+if (!doneMemory.byId || typeof doneMemory.byId !== 'object' || Array.isArray(doneMemory.byId)) doneMemory.byId = {};
+const saveDoneMemory = () => LS.set('tp_done', doneMemory);
+function doneStamp(v) {
+  if (v == null || v === '' || typeof v === 'boolean') return null;
+  const n = +v;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function rememberDoneStop(s) {
+  const ts = doneStamp(s && s.done);
+  if (!ts) return false;
+  let changed = false;
+  const auf = String(s.auftrag || '').trim();
+  if (auf) {
+    const prev = doneStamp(doneMemory.byAuftrag[auf]);
+    if (!prev || ts < prev) { doneMemory.byAuftrag[auf] = ts; changed = true; }
+  }
+  const id = s.id != null ? String(s.id).trim() : '';
+  if (id) {
+    const prev = doneStamp(doneMemory.byId[id]);
+    if (!prev || ts < prev) { doneMemory.byId[id] = ts; changed = true; }
+  }
+  return changed;
+}
+function memoryTime(s) {
+  if (!s) return null;
+  const times = [];
+  const auf = String(s.auftrag || '').trim();
+  if (auf) { const t = doneStamp(doneMemory.byAuftrag[auf]); if (t) times.push(t); }
+  const id = s.id != null ? String(s.id).trim() : '';
+  if (id) { const t = doneStamp(doneMemory.byId[id]); if (t) times.push(t); }
+  return times.length ? Math.min.apply(null, times) : null;
+}
+function applyRememberedDone(stops) {
+  if (!Array.isArray(stops)) return false;
+  let changed = false;
+  for (const s of stops) {
+    if (!s) continue;
+    const own = doneStamp(s.done);
+    const mem = memoryTime(s);
+    if (own && mem && mem < own) { s.done = mem; changed = true; }
+    else if (!own && mem) { s.done = mem; changed = true; }
+    if (rememberDoneStop(s)) changed = true;
+  }
+  if (changed) saveDoneMemory();
+  return changed;
+}
+function rememberTourDone(res) {
+  if (!res || !Array.isArray(res.stops)) return false;
+  let changed = false;
+  for (const s of res.stops) if (rememberDoneStop(s)) changed = true;
+  if (changed) saveDoneMemory();
+  return changed;
+}
+function seedDoneMemoryFromStored() {
+  if (state.result) rememberTourDone(state.result);
+  if (Array.isArray(tours)) for (const tour of tours) rememberTourDone(tour);
+}
+function forgetDoneStop(s) {
+  if (!s) return;
+  const auf = String(s.auftrag || '').trim();
+  if (auf) delete doneMemory.byAuftrag[auf];
+  const id = s.id != null ? String(s.id).trim() : '';
+  if (id) delete doneMemory.byId[id];
+  saveDoneMemory();
+}
 const saveState = () => LS.set('tp_state', { driver: state.driver, stops: state.stops, firstId: state.firstId, result: state.result });
 
 function toast(msg, ms = 3200) {
@@ -275,6 +344,7 @@ function addStops(list) {
     state.stops.push(Object.assign({ id: uid(), auftrag: '', kategorie: '', datum: '', kunde: '', plz: '', ort: '', strasse: '', typ: '', betrag: '' }, o, { geo: null, geoErr: null }));
     added++;
   }
+  keepShownTour();
   state.result = null; saveState(); render();
   return added;
 }
@@ -409,6 +479,7 @@ async function plan() {
   if (planning) return;
   const stops = state.stops;
   if (!stops.length) return toast('Bitte zuerst Aufträge hinzufügen.');
+  keepShownTour();
   planning = true; const btn = $('#planBtn'); btn.disabled = true;
   try {
     const drv = getDriver();
@@ -445,6 +516,7 @@ async function plan() {
       startTime: settings.startTime || '05:30',
       totalDur: legs.reduce((a, l) => a + l.dur, 0), totalDist: legs.reduce((a, l) => a + l.dist, 0)
     };
+    applyRememberedDone(result.stops);
     state.result = result; saveState();
     tours.unshift(result); tours = tours.slice(0, 20); LS.set('tp_tours', tours);
     renderResult(); renderTours();
@@ -1338,11 +1410,35 @@ function buildRoutePdf(model) {
   return new Blob([bytes], { type: 'application/pdf' });
 }
 
+function copyHoursOnto(fromStops, toStops) {
+  if (!Array.isArray(fromStops) || !Array.isArray(toStops)) return;
+  toStops.forEach(dst => {
+    if (!dst) return;
+    const src = fromStops.find(s => s && dst.id != null && s.id != null && String(s.id) === String(dst.id)) || null;
+    if (!src || src === dst) return;
+    if (src.hours) dst.hours = src.hours;
+    if (src.gTried) dst.gTried = true;
+  });
+}
 function saveResult(res) {
   res = res || state.result; if (!res) return;
+  const live = state.result && String(state.result.id) === String(res.id) ? state.result : null;
+  let i = Array.isArray(tours) ? tours.findIndex(t => t && String(t.id) === String(res.id)) : -1;
+  const prev = i >= 0 ? tours[i] : null;
+  // Eine spätere Öffnungszeiten-Suche darf die Erledigt-Zeit einer anderen Kopie nicht löschen.
+  if (live && res !== live) { copyHoursOnto(res.stops, live.stops); res = live; }
+  else if (!live && prev && res !== prev) { copyHoursOnto(res.stops, prev.stops); res = prev; }
+  applyRememberedDone(res.stops);
   res.updated = Date.now();
-  const i = tours.findIndex(t => t.id === res.id); if (i >= 0) tours[i] = res; LS.set('tp_tours', tours);
-  if (state.result && state.result.id === res.id) { state.result = res; saveState(); }
+  i = Array.isArray(tours) ? tours.findIndex(t => t && String(t.id) === String(res.id)) : -1;
+  if (!Array.isArray(tours)) tours = [];
+  if (i >= 0) tours[i] = res;
+  else { tours.unshift(res); tours = tours.slice(0, 20); }
+  LS.set('tp_tours', tours);
+  if (state.result && String(state.result.id) === String(res.id)) { state.result = res; saveState(); }
+}
+function keepShownTour() {
+  if (state.result) saveResult(state.result);
 }
 function geoFailToast(e) {
   const msg = e && (e.user || /nicht gefunden|Bitte|Koordinaten/.test(e.message || '')) ? e.message : 'Adresse konnte nicht gesucht werden. Bitte später noch einmal.';
@@ -1360,17 +1456,6 @@ function syncSourceStop(before, after, placeChanged) {
   match.kunde = after.kunde; match.strasse = after.strasse; match.plz = after.plz; match.ort = after.ort;
   match.auftrag = after.auftrag; match.kategorie = after.kategorie;
   if (placeChanged) { match.geo = after.geo || null; match.geoErr = after.geo ? null : 'Adresse nicht gefunden'; }
-}
-function resetPlannedRoute() {
-  if (!state.result || routeSaving) return;
-  if (!confirm('Angezeigte Route zurücksetzen? Danach kannst du neu planen. Gespeicherte Touren, Kunden, Notizen und Fahrer bleiben erhalten.')) return;
-  state.result = null;
-  routeEdit = null; routeEditTour = null;
-  saveState();
-  renderResult();
-  toast('Route zurückgesetzt. Aufträge, Touren, Notizen und Fahrer bleiben. Unten auf „Tour planen“ tippen.');
-  const list = $('#stopList');
-  if (list) list.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 async function saveEndpoint(box) {
   if (routeSaving || !state.result) return;
@@ -1444,8 +1529,11 @@ async function saveRouteStop(li) {
       if (!geo) throw Object.assign(new Error('Adresse nicht gefunden – bitte Straße, PLZ und Ort prüfen.'), { user: true });
       placeChanged = true;
     }
+    const keptDone = doneStamp(s.done);
     s.kunde = next.kunde; s.strasse = next.strasse; s.plz = next.plz; s.ort = next.ort;
     s.auftrag = next.auftrag; s.kategorie = next.kategorie;
+    if (keptDone) s.done = keptDone;
+    applyRememberedDone([s]);
     if (placeChanged) { s.geo = geo; s.hours = null; s.gTried = false; delete s.gNoHours; }
     syncSourceStop(before, s, placeChanged);
     const ok = placeChanged ? await recomputeLegs(state.result) : true;
@@ -1514,11 +1602,38 @@ function stopEditForm(s) {
     <div class="row"><button type="button" class="btn small secondary" data-act="canceledit">Abbrechen</button><button type="button" class="btn small" data-act="savestop">Übernehmen</button></div>
   </div>`;
 }
+function editFirstStop() {
+  if (routeSaving || !state.result || !state.result.stops || !state.result.stops.length) {
+    if (state.result && (!state.result.stops || !state.result.stops.length)) toast('Diese Tour hat keinen Stopp.');
+    return;
+  }
+  routeEdit = 'stop|0';
+  renderResult();
+  focusRouteEdit();
+  const box = $('#firstStop');
+  if (box) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function firstStopBox(res) {
+  const host = $('#firstStop');
+  if (!host) return;
+  const s = res && res.stops && res.stops[0];
+  if (!s) { host.innerHTML = ''; return; }
+  const editing = routeEdit === 'stop|0';
+  const who = s.kunde || s.auftrag || 'Stopp 1';
+  host.innerHTML = `<div class="firststop" data-i="0">
+    <div class="k">Erster Stopp</div>
+    ${editing ? stopEditForm(s) : `<div class="who">${esc(who)}</div>
+      <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
+      <button type="button" class="btn firstbtn" data-act="editfirst">Ersten Stopp bearbeiten</button>
+      <p class="note">Der erste Kunde. Nicht die Startadresse.</p>`}
+  </div>`;
+}
 function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInner)); }
 function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
-  if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; return; }
+  if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; const host = $('#firstStop'); if (host) host.innerHTML = ''; return; }
   if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; }
+  if (applyRememberedDone(res.stops)) saveResult(res);
   sec.hidden = false;
   const S = computeSchedule(res);
   const doneN = res.stops.filter(s => s.done).length;
@@ -1536,6 +1651,7 @@ function renderResultInner() {
   } else { $('#nextBox').innerHTML = `<div class="nb-l">Alle Stopps erledigt ✓</div><div class="nb-eta">Zurück ${hasExplicitDest(res) ? 'am Ziel' : 'zu Hause'} ca. <b>${hhmm(S.homeArr)}</b></div>`; $('#nextBox').hidden = false; }
   const ends = $('#endPoints');
   if (ends) ends.innerHTML = endpointBlock('start', res) + endpointBlock('dest', res) + '<p class="note endpoints-note">Nur diese Route. Die Fahrer-Adressen in den Einstellungen bleiben unverändert.</p>';
+  firstStopBox(res);
   const g = chunk(pts, 9), a = chunk(pts, 13);
   let html = '';
   html += `<div class="row">${g.map((p, i) => `<a class="btn gmaps" target="_blank" rel="noopener" href="${esc(googleUrl(p))}">Google Maps${g.length > 1 ? ` ${i + 1}/${g.length}` : ''}</a>`).join('')}</div>`;
@@ -1547,7 +1663,7 @@ function renderResultInner() {
     const l = res.legs[i] || { dur: 0, dist: 0 }; const p = pts[i + 1], r = S.rows[i], isNext = i === S.next;
     const eta = r.done ? `<div class="eta done">✓ Erledigt um ${hhmm(r.dep)}</div>`
       : `<div class="eta">${isNext ? '<span class="nexttag">Als Nächstes</span> ' : ''}Ankunft ca. <b>${hhmm(r.arr)}</b> <span class="muted">· weiter ${hhmm(r.dep)}</span></div>`;
-    const editing = routeEdit === 'stop|' + i;
+    const editing = i > 0 && routeEdit === 'stop|' + i;
     return `<li class="stop rstop${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}"><div class="badge">${r.done ? '✓' : i + 1}</div>
       ${eta}
       <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}</div>
@@ -1634,7 +1750,7 @@ function bind() {
   $('#today').textContent = new Date().toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   $('#driverSeg').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    state.driver = b.dataset.driver; state.result = null; saveState(); renderDriver(); renderResult();
+    keepShownTour(); state.driver = b.dataset.driver; state.result = null; saveState(); renderDriver(); renderResult();
   });
   $('#fileInput').addEventListener('change', e => { handleFiles(e.target.files); e.target.value = ''; });
   $('#toggleManual').addEventListener('click', () => { const b = $('#manualBox'); b.hidden = !b.hidden; if (!b.hidden) $('#manualText').focus(); });
@@ -1647,6 +1763,7 @@ function bind() {
   });
   $('#clearStops').addEventListener('click', () => {
     if (!confirm('Alle Aufträge aus der Liste löschen?')) return;
+    keepShownTour();
     state.stops = []; state.firstId = null; state.result = null; saveState(); render();
   });
   $('#stopList').addEventListener('click', e => {
@@ -1655,23 +1772,31 @@ function bind() {
     const li = e.target.closest('.stop'); if (!li) return;
     const s = state.stops.find(x => x.id === li.dataset.id); if (!s) return;
     const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'del') { state.stops = state.stops.filter(x => x !== s); if (state.firstId === s.id) state.firstId = null; state.result = null; }
+    if (act === 'del') { keepShownTour(); state.stops = state.stops.filter(x => x !== s); if (state.firstId === s.id) state.firstId = null; state.result = null; }
     else if (act === 'edit') state.editing = state.editing === s.id ? null : s.id;
     else if (act === 'cancel') state.editing = null;
     else if (act === 'save') {
       const box = li.querySelector('[data-edit]'); const old = addrText(s);
       box.querySelectorAll('input').forEach(i => s[i.name] = i.value.trim());
       if (addrText(s) !== old) { s.geo = null; s.geoErr = null; }
+      keepShownTour();
       state.editing = null; state.result = null;
     } else if (e.target.closest('[data-edit]')) return;
-    else { state.firstId = state.firstId === s.id ? null : s.id; state.result = null; }
+    else { keepShownTour(); state.firstId = state.firstId === s.id ? null : s.id; state.result = null; }
     saveState(); renderStops(); renderResult();
   });
   $('#planBtn').addEventListener('click', plan);
   $('#printRoute').addEventListener('click', () => {
     printRoute().catch(e => { if (e && e.name === 'AbortError') return; console.error(e); toast('Drucken fehlgeschlagen'); });
   });
-  $('#resetRoute').addEventListener('click', resetPlannedRoute);
+  $('#firstStop').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b || !state.result) return;
+    const act = b.dataset.act;
+    if (act === 'editfirst') { editFirstStop(); return; }
+    if (act === 'canceledit') { routeEdit = null; renderResult(); return; }
+    if (act === 'savestop') { const box = e.target.closest('[data-i]'); if (box) saveRouteStop(box); }
+  });
   $('#endPoints').addEventListener('click', e => {
     const b = e.target.closest('[data-act]'); const box = e.target.closest('[data-end]');
     if (!b || !box || !state.result) return;
@@ -1699,12 +1824,20 @@ function bind() {
     if (handleNoteClick(e)) return;
     const b = e.target.closest('[data-act]'); const li = e.target.closest('.rstop'); if (!b || !li || !state.result) return;
     const act = b.dataset.act;
-    if (act === 'editstop') { routeEdit = 'stop|' + li.dataset.i; renderResult(); focusRouteEdit(); return; }
+    if (act === 'editstop') {
+      if (String(li.dataset.i) === '0') { editFirstStop(); return; }
+      routeEdit = 'stop|' + li.dataset.i; renderResult(); focusRouteEdit(); return;
+    }
     if (act === 'canceledit') { routeEdit = null; renderResult(); return; }
     if (act === 'savestop') { saveRouteStop(li); return; }
     const s = state.result.stops[+li.dataset.i]; if (!s) return;
-    if (act === 'done') { s.done = Date.now(); toast(`${label(s)} erledigt – Zeiten neu berechnet`); }
-    else if (b.dataset.act === 'undo') { s.done = null; }
+    if (act === 'done') {
+      const mem = memoryTime(s);
+      s.done = mem || Date.now();
+      rememberDoneStop(s); saveDoneMemory();
+      toast(`${label(s)} erledigt – Zeiten neu berechnet`);
+    }
+    else if (act === 'undo') { s.done = null; forgetDoneStop(s); }
     else if (b.dataset.act === 'retryhours') { fetchHoursForResult(state.result, false); return; }
     else return;
     saveResult(); renderResult(); renderTours();
@@ -1722,7 +1855,12 @@ function bind() {
     const li = e.target.closest('.tour'); if (!li) return;
     const act = e.target.closest('[data-act]')?.dataset.act; const t = tours.find(x => x.id === li.dataset.tid);
     if (act === 'deltour') { tours = tours.filter(x => x !== t); LS.set('tp_tours', tours); renderTours(); }
-    else if (act === 'open' && t) { state.result = t; saveState(); renderResult(); fetchHoursForResult(t); $('#resultSection').scrollIntoView({ behavior: 'smooth' }); }
+    else if (act === 'open' && t) {
+      keepShownTour();
+      const fresh = tours.find(x => x && String(x.id) === String(t.id)) || t;
+      applyRememberedDone(fresh.stops);
+      state.result = fresh; saveResult(fresh); renderResult(); fetchHoursForResult(fresh); $('#resultSection').scrollIntoView({ behavior: 'smooth' });
+    }
   });
   $('#coordLinks').checked = !!settings.coordLinks;
   $('#googleKey').value = settings.googleKey || '';
@@ -1768,6 +1906,8 @@ function applyImportedTour(payload) {
   if (idx < 0 && name) idx = tours.findIndex(t => t && String(t.name || '').trim() === name);
   if (idx >= 0) tours[idx] = tour;
   else { tours.unshift(tour); tours = tours.slice(0, 20); }
+  rememberTourDone(tour);
+  applyRememberedDone(tour.stops);
   LS.set('tp_tours', tours);
   state.result = tour;
   saveState();
@@ -1905,6 +2045,7 @@ function lightTourOrNull(stopsRaw, name, src) {
 
 (async function boot() {
   await applyTourFromHash();
+  seedDoneMemoryFromStored();
   bind(); render();
   if (state.result) fetchHoursForResult(state.result);
   window.addEventListener('tp-settings-saved', () => { if (state.result) fetchHoursForResult(state.result); });
@@ -1915,6 +2056,6 @@ function lightTourOrNull(stopsRaw, name, src) {
   else if (!getDriver()) openSettings();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
   // für Tests
-  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, tours: () => tours, handleFiles, plan, routeSheet, buildRoutePdf, printRoute, resetPlannedRoute, routeStart, routeEnd, render: () => render() };
+  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, tours: () => tours, handleFiles, plan, routeSheet, buildRoutePdf, printRoute, routeStart, routeEnd, render: () => render() };
   window.addEventListener('hashchange', () => { if (/[#&](setup|tour)=/.test(location.hash)) location.reload(); });
 })();
