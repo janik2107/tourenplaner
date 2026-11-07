@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v14';
+const VERSION = 'tp-v15';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1602,31 +1602,62 @@ function stopEditForm(s) {
     <div class="row"><button type="button" class="btn small secondary" data-act="canceledit">Abbrechen</button><button type="button" class="btn small" data-act="savestop">Übernehmen</button></div>
   </div>`;
 }
-function editFirstStop() {
-  if (routeSaving || !state.result || !state.result.stops || !state.result.stops.length) {
-    if (state.result && (!state.result.stops || !state.result.stops.length)) toast('Diese Tour hat keinen Stopp.');
-    return;
-  }
-  routeEdit = 'stop|0';
+function openStopEdit(index) {
+  if (routeSaving || !state.result || !state.result.stops || !state.result.stops[index]) return;
+  routeEdit = 'stop|' + index;
   renderResult();
   focusRouteEdit();
-  const box = $('#firstStop');
-  if (box) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const row = document.querySelector(`#routeList .rstop[data-i="${index}"]`);
+  if (row) row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function editFirstStop() {
+  if (!state.result || !state.result.stops || !state.result.stops.length) {
+    if (state.result) toast('Diese Tour hat keinen Stopp.');
+    return;
+  }
+  openStopEdit(0);
 }
 function firstStopBox(res) {
   const host = $('#firstStop');
   if (!host) return;
   const s = res && res.stops && res.stops[0];
   if (!s) { host.innerHTML = ''; return; }
-  const editing = routeEdit === 'stop|0';
   const who = s.kunde || s.auftrag || 'Stopp 1';
-  host.innerHTML = `<div class="firststop" data-i="0">
+  host.innerHTML = `<div class="firststop">
     <div class="k">Erster Stopp</div>
-    ${editing ? stopEditForm(s) : `<div class="who">${esc(who)}</div>
-      <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
-      <button type="button" class="btn firstbtn" data-act="editfirst">Ersten Stopp bearbeiten</button>
-      <p class="note">Der erste Kunde. Nicht die Startadresse.</p>`}
+    <div class="who">${esc(who)}</div>
+    <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
+    <button type="button" class="btn firstbtn" data-act="editfirst">Ersten Stopp bearbeiten</button>
+    <p class="note">Der erste Kunde. Nicht die Startadresse. In der Liste nach rechts wischen.</p>
   </div>`;
+}
+async function removeRouteStop(index) {
+  if (routeSaving || !state.result || !state.result.stops || !state.result.stops[index]) return;
+  const res = state.result;
+  const removed = res.stops[index];
+  res.stops.splice(index, 1);
+  if (routeEdit && routeEdit.startsWith('stop|')) {
+    const ei = +routeEdit.slice(5);
+    if (ei === index) routeEdit = null;
+    else if (ei > index) routeEdit = 'stop|' + (ei - 1);
+  }
+  routeSaving = true;
+  let ok = false;
+  try {
+    ok = await recomputeLegs(res);
+    if (!ok) {
+      res.legs = Array.from({ length: res.stops.length + 1 }, () => ({ dur: 0, dist: 0 }));
+      res.geometry = null;
+      res.totalDur = 0;
+      res.totalDist = 0;
+    }
+    mapFor = null;
+    saveResult(res);
+    renderStops();
+    renderResult();
+    renderTours();
+    toast(ok ? `${label(removed)} entfernt. Zeiten neu berechnet.` : `${label(removed)} entfernt. Die Fahrzeit konnte nicht neu berechnet werden.`, ok ? 3200 : 5000);
+  } finally { routeSaving = false; }
 }
 function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInner)); }
 function renderResultInner() {
@@ -1663,13 +1694,14 @@ function renderResultInner() {
     const l = res.legs[i] || { dur: 0, dist: 0 }; const p = pts[i + 1], r = S.rows[i], isNext = i === S.next;
     const eta = r.done ? `<div class="eta done">✓ Erledigt um ${hhmm(r.dep)}</div>`
       : `<div class="eta">${isNext ? '<span class="nexttag">Als Nächstes</span> ' : ''}Ankunft ca. <b>${hhmm(r.arr)}</b> <span class="muted">· weiter ${hhmm(r.dep)}</span></div>`;
-    const editing = i > 0 && routeEdit === 'stop|' + i;
-    return `<li class="stop rstop${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}"><div class="badge">${r.done ? '✓' : i + 1}</div>
+    const editing = routeEdit === 'stop|' + i;
+    return `<li class="stop rstop swipe${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}">
+      <div class="swipe-bg" aria-hidden="true"><span class="swipe-hint edit">Bearbeiten</span><span class="swipe-hint remove">Entfernen</span></div>
+      <div class="swipe-face"><div class="badge">${r.done ? '✓' : i + 1}</div>
       ${eta}
       <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}</div>
       ${editing ? stopEditForm(s) : `${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
-      <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>
-      <button type="button" class="btn editbtn" data-act="editstop">Stopp korrigieren</button>`}
+      <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>`}
       <div class="leg">🚗 ${fmtMin(l.dur)} · ${fmtKm(l.dist)} Anfahrt</div>
       ${noteHtml(s, 'route|' + i)}
       ${r.done ? '' : hoursHtml(s, r, res)}
@@ -1677,7 +1709,7 @@ function renderResultInner() {
         ${r.done ? `<button class="btn small secondary" data-act="undo">↶ Rückgängig</button>` : `<label class="onsite">Vor Ort <input type="number" min="0" max="600" inputmode="numeric" data-act="onsite" value="${onsiteOf(s)}"> Min.</label><button class="btn small donebtn" data-act="done">✓ Erledigt</button>`}
       </div>
       ${r.done ? '' : `<div class="navlbl">Navigation zu ${esc(label(s))}</div><div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`}
-    </li>`;
+    </div></li>`;
   });
   const lb = res.legs[res.stops.length] || { dur: 0, dist: 0 };
   const endPt = pts[pts.length - 1];
@@ -1746,6 +1778,62 @@ function collectDriverFields() {
 function openSettings() { renderDriverFields(); const d = $('#settings'); d.open = true; d.scrollIntoView({ behavior: 'smooth' }); }
 
 /* ---------------- Events ---------------- */
+function bindStopSwipe(list) {
+  if (!list) return;
+  let drag = null;
+  const faceOf = li => li.querySelector('.swipe-face');
+  const moveFace = (li, dx) => {
+    const face = faceOf(li);
+    if (!face) return 0;
+    const max = Math.min(148, Math.max(96, li.clientWidth * 0.42));
+    const x = Math.max(-max, Math.min(max, dx));
+    face.style.transform = `translate3d(${x}px,0,0)`;
+    li.classList.toggle('reveal-edit', x > 24);
+    li.classList.toggle('reveal-remove', x < -24);
+    return x;
+  };
+  const resetFace = li => {
+    const face = faceOf(li);
+    if (face) { face.classList.remove('dragging'); face.style.transform = ''; }
+    li.classList.remove('reveal-edit', 'reveal-remove');
+  };
+  list.addEventListener('pointerdown', e => {
+    if ((e.button != null && e.button !== 0) || routeSaving) return;
+    if (e.target.closest('input, textarea, button, a, select, label, .edit')) return;
+    const li = e.target.closest('.rstop.swipe[data-i]');
+    if (!li || !state.result) return;
+    if (routeEdit === 'stop|' + li.dataset.i) return;
+    if (drag) resetFace(drag.li);
+    drag = { li, id: e.pointerId, x: e.clientX, y: e.clientY, dx: 0, lock: null };
+  });
+  document.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.lock) {
+      if (Math.hypot(dx, dy) < 12) return;
+      drag.lock = Math.abs(dx) > Math.abs(dy) * 1.15 ? 'h' : 'v';
+      if (drag.lock === 'v') { drag = null; return; }
+      faceOf(drag.li)?.classList.add('dragging');
+    }
+    if (drag.lock !== 'h') return;
+    if (e.cancelable) e.preventDefault();
+    drag.dx = dx;
+    moveFace(drag.li, dx);
+  }, { passive: false, capture: true });
+  const finish = e => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    const { li, dx, lock } = drag;
+    drag = null;
+    if (lock === 'h' && Math.abs(dx) > 10) list._suppressClickUntil = Date.now() + 500;
+    if (lock !== 'h') { resetFace(li); return; }
+    const need = Math.min(84, Math.max(64, li.clientWidth * 0.28));
+    resetFace(li);
+    if (dx >= need) openStopEdit(+li.dataset.i);
+    else if (dx <= -need) removeRouteStop(+li.dataset.i);
+  };
+  document.addEventListener('pointerup', finish, true);
+  document.addEventListener('pointercancel', finish, true);
+}
 function bind() {
   $('#today').textContent = new Date().toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   $('#driverSeg').addEventListener('click', e => {
@@ -1792,11 +1880,9 @@ function bind() {
   $('#firstStop').addEventListener('click', e => {
     const b = e.target.closest('[data-act]');
     if (!b || !state.result) return;
-    const act = b.dataset.act;
-    if (act === 'editfirst') { editFirstStop(); return; }
-    if (act === 'canceledit') { routeEdit = null; renderResult(); return; }
-    if (act === 'savestop') { const box = e.target.closest('[data-i]'); if (box) saveRouteStop(box); }
+    if (b.dataset.act === 'editfirst') editFirstStop();
   });
+  bindStopSwipe($('#routeList'));
   $('#endPoints').addEventListener('click', e => {
     const b = e.target.closest('[data-act]'); const box = e.target.closest('[data-end]');
     if (!b || !box || !state.result) return;
@@ -1821,13 +1907,10 @@ function bind() {
   $('#importTour').addEventListener('change', e => { const f = e.target.files[0]; if (f) importTourFile(f); e.target.value = ''; });
   renderNotesList();
   $('#routeList').addEventListener('click', e => {
+    if ($('#routeList')._suppressClickUntil > Date.now()) { $('#routeList')._suppressClickUntil = 0; e.preventDefault(); e.stopPropagation(); return; }
     if (handleNoteClick(e)) return;
     const b = e.target.closest('[data-act]'); const li = e.target.closest('.rstop'); if (!b || !li || !state.result) return;
     const act = b.dataset.act;
-    if (act === 'editstop') {
-      if (String(li.dataset.i) === '0') { editFirstStop(); return; }
-      routeEdit = 'stop|' + li.dataset.i; renderResult(); focusRouteEdit(); return;
-    }
     if (act === 'canceledit') { routeEdit = null; renderResult(); return; }
     if (act === 'savestop') { saveRouteStop(li); return; }
     const s = state.result.stops[+li.dataset.i]; if (!s) return;
