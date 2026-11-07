@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v17';
+const VERSION = 'tp-v18';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1827,10 +1827,20 @@ function renderMap(res) {
   if (separateEnd) L.marker(ll[ll.length - 1], { icon: L.divIcon({ className: 'num-marker home', html: 'Z' }) }).addTo(mapLayer);
   setTimeout(() => { map.invalidateSize(); map.fitBounds(L.latLngBounds(ll), { padding: [24, 24] }); }, 50);
 }
+function datumKey(t) {
+  const m = String(t && t.datum || '').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+  return m ? (+m[3]) * 10000 + (+m[2]) * 100 + (+m[1]) : 0;
+}
+function toursForList() {
+  return tours.map((t, i) => ({ t, i })).sort((a, b) => {
+    const d = datumKey(b.t) - datumKey(a.t);
+    return d || a.i - b.i;
+  }).map(x => x.t);
+}
 function renderTours() {
   const ul = $('#tourList');
   if (!tours.length) { ul.innerHTML = '<li class="empty">Noch keine Touren geplant.</li>'; return; }
-  ul.innerHTML = tours.map(t => { const dn = t.stops.filter(s => s.done).length;
+  ul.innerHTML = toursForList().map(t => { const dn = (t.stops || []).filter(s => s.done).length;
     const title = t.name ? (t.datum ? `${esc(t.name)} · ${esc(t.datum)}` : esc(t.name)) : `${esc(t.driverName)} · ${esc(t.datum)}`;
     return `<li class="tour" data-tid="${t.id}">
     <div><div class="t">${title}</div><div class="s">${t.stops.length} Stopps${dn ? ` (${dn} erledigt)` : ''} · ${fmtKm(t.totalDist)} · ${fmtMin(t.totalDur)}</div>
