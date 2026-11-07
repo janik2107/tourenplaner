@@ -159,8 +159,13 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .nitem textarea{margin:6px 0;font-size:16px}
 .onsite{white-space:nowrap}
 .printbtn{width:100%;margin:2px 0 10px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
-.printbtn:active,.resetbtn:active,.editbtn:active{background:#e5e5ea}
-.resetbtn{width:100%;margin:0 0 12px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
+.printbtn:active,.firstbtn:active,.editbtn:active{background:#e5e5ea}
+.firstbtn{width:100%;margin:8px 0 4px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
+.firststop{margin:0 0 12px}
+.firststop .k{font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
+.firststop .who{font-size:18px;font-weight:700;margin-top:2px}
+.firststop .a{font-size:16px;color:var(--text)}
+.firststop .a i{color:var(--sub);font-style:normal}
 .endpoints-note{margin-top:0}
 .endpoint{background:var(--card2);border-radius:12px;padding:12px;margin:0 0 10px}
 .endpoint .k{font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
