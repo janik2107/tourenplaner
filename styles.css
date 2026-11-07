@@ -107,7 +107,7 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .drv:first-child{border-top:0;margin-top:8px}
 .drv-head{display:flex;justify-content:space-between;align-items:center;font-size:15px}
 
-.tourctl{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:-2px 0 12px;font-size:15px;color:var(--sub)}
+.tourctl{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:-2px 0 12px;font-size:15px;color:var(--sub);flex-wrap:wrap}
 .tourctl b{color:var(--text)}
 .tourctl input{width:auto;padding:6px 8px;margin-left:6px;font-size:16px}
 .nextbox{background:linear-gradient(135deg,#0a3d80,#0a84ff);border-radius:12px;padding:12px 14px;margin-bottom:12px}
@@ -172,6 +172,9 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .printbtn{width:100%;margin:2px 0 10px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
 .printbtn:active,.firstbtn:active,.editbtn:active{background:#e5e5ea}
 .firstbtn{width:100%;margin:8px 0 4px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
+.savebtn{width:100%;margin:0 0 8px;background:#fff;color:#000;font-size:17px;font-weight:700;padding:15px 14px;border-radius:12px}
+.savebtn:active{background:#e5e5ea}
+.discardbtn{width:100%;margin:0 0 12px}
 .firststop{margin:0 0 12px}
 .firststop .k{font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
 .firststop .who{font-size:18px;font-weight:700;margin-top:2px}
