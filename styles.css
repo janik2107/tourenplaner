@@ -74,6 +74,16 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .navbtns .row .btn{flex:1;font-size:15px}
 .navbtns .lbl{font-size:13px;color:var(--sub);margin-top:2px}
 .route .stop{cursor:default}
+.route .swipe{position:relative;overflow:hidden;padding:0;touch-action:pan-y}
+.swipe-bg{position:absolute;inset:0;display:flex;justify-content:space-between;align-items:stretch;pointer-events:none}
+.swipe-hint{flex:1;display:flex;align-items:center;padding:0 16px;font-weight:800;font-size:16px;color:#fff}
+.swipe-hint.edit{justify-content:flex-start;background:#0a84ff}
+.swipe-hint.remove{justify-content:flex-end;background:var(--red)}
+.swipe-face{position:relative;z-index:1;background:var(--card);padding:12px 4px 12px 44px;transition:transform .18s ease}
+.swipe-face.dragging{transition:none}
+.rstop.isnext .swipe-face{background:#10243a}
+.rstop.reveal-edit .swipe-hint.edit,.rstop.reveal-remove .swipe-hint.remove{font-size:17px}
+.swipehint{margin:0 0 6px}
 .leg{color:var(--sub);font-size:13px;margin:0 0 4px}
 .route .navs{display:flex;gap:8px;margin-top:8px}
 .route .navs .btn{flex:1}
