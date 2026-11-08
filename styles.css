@@ -6,6 +6,7 @@
 html{color-scheme:dark;overflow-anchor:none}
 html,body{margin:0;background:var(--bg);color:var(--text);font:17px/1.35 var(--font);-webkit-text-size-adjust:100%;touch-action:manipulation;-webkit-font-smoothing:antialiased;overflow-anchor:none}
 html.sheet-open,html.sheet-open body{overflow:hidden}
+html.sheet-open #app,html.sheet-open #bottomBar{pointer-events:none}
 main{max-width:640px;margin:0 auto;padding:calc(var(--safe-t) + 12px) 16px 0}
 .top h1{font-size:34px;font-weight:700;margin:8px 0 0;letter-spacing:-.4px}
 .sub{color:var(--sub);font-size:15px;margin:2px 0 0}
@@ -108,7 +109,9 @@ textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--blue)}
 .bottom{position:fixed;left:0;right:0;bottom:var(--vv-bottom);z-index:30;display:flex;flex-direction:column;padding:var(--bar-pad) 16px calc(var(--bar-pad) + var(--safe-b));background:#000;border-top:.5px solid var(--sep)}
 .bottom .bar-actions{display:flex;gap:8px;align-items:stretch;height:var(--bar-btn)}
 .bottom .bar-actions .btn{flex:1 1 0;width:auto;min-width:0;max-width:none;height:var(--bar-btn);min-height:var(--bar-btn);max-height:var(--bar-btn);margin:0;padding:0 10px;white-space:nowrap;line-height:1.1;font-size:16px;overflow:hidden;text-overflow:ellipsis}
-.toast{position:fixed;left:16px;right:16px;bottom:calc(var(--bar-h) + 12px + var(--vv-bottom));background:#3a3a3c;color:#fff;padding:12px 14px;border-radius:12px;font-size:15px;text-align:center;max-width:600px;margin:0 auto;box-shadow:0 6px 24px rgba(0,0,0,.5);z-index:40}
+.toast{position:fixed;left:16px;right:16px;bottom:calc(var(--bar-h) + 12px + var(--vv-bottom));background:#3a3a3c;color:#fff;padding:12px 14px;border-radius:12px;font-size:15px;text-align:center;max-width:600px;margin:0 auto;box-shadow:0 6px 24px rgba(0,0,0,.5);z-index:90}
+html.sheet-open .toast{bottom:calc(16px + var(--vv-bottom))}
+html.sheet-open .bottom{visibility:hidden}
 
 .drv{border-top:1px solid var(--sep);padding-top:10px;margin-top:12px}
 .drv:first-child{border-top:0;margin-top:8px}
@@ -188,16 +191,16 @@ textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--blue)}
 .pickstop .pick-k{display:block;font-weight:800}
 .pickstop .pick-a{display:block;color:#3a3a3c;font-size:15px;font-weight:500}
 .addstopbtn{background:#fff;color:#000;font-weight:600}
-.sheet{position:fixed;inset:0;z-index:60}
-.sheet-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.45)}
-.sheet-panel{position:absolute;left:0;right:0;bottom:var(--vv-bottom);max-height:calc(100% - var(--vv-bottom) - var(--safe-t) - 8px);display:flex;flex-direction:column;background:#1c1c1e;border-radius:14px 14px 0 0;padding:6px 16px calc(12px + var(--safe-b));box-shadow:0 -10px 40px rgba(0,0,0,.5)}
-.sheet-grab{width:36px;height:5px;border-radius:3px;background:#48484a;margin:4px auto 8px}
-.sheet-bar{position:relative;display:flex;align-items:center;min-height:44px}
+.sheet{position:fixed;left:0;right:0;top:0;bottom:var(--vv-bottom);z-index:80;background:#000;display:flex;flex-direction:column}
+.sheet-backdrop{position:absolute;inset:0;background:#000}
+.sheet-panel{position:relative;z-index:1;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;background:#1c1c1e;padding:calc(8px + var(--safe-t)) 16px 12px}
+.sheet-grab{width:36px;height:5px;border-radius:3px;background:#48484a;margin:4px auto 8px;flex:none}
+.sheet-bar{position:relative;display:flex;align-items:center;min-height:44px;flex:none}
 .sheet-bar .link{position:relative;z-index:1;font-size:17px;padding:8px 0}
 .sheet-title{position:absolute;left:0;right:0;text-align:center;font-size:17px;font-weight:600;pointer-events:none}
-.sheet-panel input{font-size:17px;min-height:44px;margin-top:4px}
-.sheet-panel .note{margin:8px 2px 0}
-.sheet-list{overflow:auto;min-height:132px;margin:8px 0 0;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.sheet-panel input{font-size:17px;min-height:44px;margin-top:4px;flex:none}
+.sheet-panel .note{margin:8px 2px 0;flex:none}
+.sheet-list{flex:1 1 auto;min-height:0;overflow:auto;margin:8px 0 0;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .suggest{appearance:none;width:100%;text-align:left;background:transparent;color:var(--text);border:0;border-top:.5px solid var(--sep);padding:11px 2px;min-height:58px;display:flex;flex-direction:column;align-items:flex-start;gap:2px;font:17px/1.25 var(--font);cursor:pointer}
 .sheet-list li:first-child .suggest{border-top:0}
 .suggest-main{font-weight:600}

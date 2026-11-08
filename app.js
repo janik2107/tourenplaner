@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v23';
+const VERSION = 'tp-v24';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1834,17 +1834,61 @@ let addSheetSeq = 0;
 let addSheetHits = [];
 let sheetScrollY = 0;
 const ADDR_TYPES = new Set(['street_address', 'route', 'premise', 'subpremise', 'geocode', 'plus_code', 'political', 'postal_code', 'locality', 'postal_town', 'country', 'administrative_area_level_1', 'administrative_area_level_2', 'administrative_area_level_3', 'neighborhood', 'sublocality', 'sublocality_level_1', 'intersection']);
+function setBehindSheet(on) {
+  for (const id of ['app', 'bottomBar']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (on) { el.setAttribute('inert', ''); el.setAttribute('aria-hidden', 'true'); }
+    else { el.removeAttribute('inert'); el.removeAttribute('aria-hidden'); }
+  }
+  const fields = document.querySelectorAll('#app input, #app textarea, #app select, #bottomBar input, #bottomBar textarea, #bottomBar select');
+  if (on) {
+    const probe = document.getElementById('app');
+    if (probe && !('inert' in probe)) fields.forEach(el => { if (!el.disabled) { el.dataset.sheetLock = '1'; el.disabled = true; } });
+  } else {
+    document.querySelectorAll('[data-sheet-lock]').forEach(el => { el.disabled = false; delete el.dataset.sheetLock; });
+  }
+}
+function lockSheetScroll() {
+  sheetScrollY = window.scrollY || window.pageYOffset || 0;
+  const body = document.body;
+  body.style.position = 'fixed';
+  body.style.top = `-${sheetScrollY}px`;
+  body.style.left = '0';
+  body.style.right = '0';
+  body.style.width = '100%';
+}
+function unlockSheetScroll() {
+  const y = sheetScrollY || 0;
+  const body = document.body;
+  body.style.position = '';
+  body.style.top = '';
+  body.style.left = '';
+  body.style.right = '';
+  body.style.width = '';
+  window.scrollTo(0, y);
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
 function closeAddSheet() {
   const sheet = $('#addSheet');
   const open = !!(sheet && !sheet.hidden);
   clearTimeout(addSheetTimer);
   if (addSheetAbort) { addSheetAbort.abort(); addSheetAbort = null; }
-  if (sheet) sheet.hidden = true;
+  if (sheet) {
+    sheet.hidden = true;
+    sheet.style.top = '';
+    sheet.style.height = '';
+    sheet.style.bottom = '';
+    sheet.style.left = '';
+    sheet.style.right = '';
+  }
   document.documentElement.classList.remove('sheet-open');
+  setBehindSheet(false);
   if (!open) return;
   addSheetHits = [];
-  const y = sheetScrollY;
-  requestAnimationFrame(() => { if (Math.abs(window.scrollY - y) > 1) window.scrollTo(0, y); });
+  const input = $('#addSheetInput');
+  if (input) input.blur();
+  unlockSheetScroll();
 }
 function openAddSheet() {
   if (!state.result || routeSaving) return;
@@ -1862,15 +1906,31 @@ function openAddSheet() {
   const list = $('#addSheetList');
   const hint = $('#addSheetHint');
   if (!sheet || !input || !list) return;
+  const settingsEl = $('#settings');
+  if (settingsEl) settingsEl.open = false;
+  if (document.activeElement && document.activeElement !== input && document.activeElement.blur) document.activeElement.blur();
   input.value = '';
   list.innerHTML = '';
   if (hint) { hint.hidden = false; hint.textContent = 'Straße mit Hausnummer oder Name, zum Beispiel ein Autohaus.'; }
-  sheetScrollY = window.scrollY;
+  lockSheetScroll();
   sheet.hidden = false;
   document.documentElement.classList.add('sheet-open');
+  setBehindSheet(true);
   syncBarSpace();
   input.focus({ preventScroll: true });
-  if (window.scrollY !== sheetScrollY) window.scrollTo(0, sheetScrollY);
+}
+function keepFieldVisible(el) {
+  if (!el || !el.getBoundingClientRect || document.documentElement.classList.contains('sheet-open')) return;
+  if (el.closest && el.closest('#addSheet')) return;
+  const vv = window.visualViewport;
+  const topLimit = (vv ? vv.offsetTop : 0) + 8;
+  const bar = document.querySelector('.bottom');
+  const barH = bar ? bar.offsetHeight : 0;
+  const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+  const bottomLimit = viewBottom - barH - 8;
+  const r = el.getBoundingClientRect();
+  if (r.bottom > bottomLimit) window.scrollBy(0, Math.ceil(r.bottom - bottomLimit));
+  else if (r.top < topLimit) window.scrollBy(0, Math.floor(r.top - topLimit));
 }
 function googlePlacesError(status) {
   if (status === 400 || status === 403) return 'Der Google-Schlüssel wird nicht akzeptiert. Bitte in den Einstellungen prüfen.';
@@ -2388,9 +2448,12 @@ function bind() {
     if (e.target.closest && e.target.closest('.sheet-panel')) return;
     e.preventDefault();
   }, { passive: false });
-  window.addEventListener('scroll', () => {
-    if (!document.documentElement.classList.contains('sheet-open')) return;
-    if (Math.abs(window.scrollY - sheetScrollY) > 1) window.scrollTo(0, sheetScrollY);
+  document.addEventListener('focusin', e => {
+    const el = e.target;
+    if (!el || !el.matches || !el.matches('input, textarea, select')) return;
+    if (el.closest && el.closest('#addSheet')) return;
+    setTimeout(() => keepFieldVisible(el), 60);
+    setTimeout(() => keepFieldVisible(el), 320);
   });
   $('#routeSave').addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
@@ -2611,7 +2674,27 @@ function syncBarSpace() {
     barGapPx = gap;
     document.documentElement.style.setProperty('--vv-bottom', gap + 'px');
   }
-  if (gap > 0) return;
+  const sheet = document.getElementById('addSheet');
+  if (sheet && !sheet.hidden && vv) {
+    const top = Math.max(0, Math.round(vv.offsetTop));
+    const height = Math.max(0, Math.round(vv.height));
+    sheet.style.top = top + 'px';
+    sheet.style.height = height + 'px';
+    sheet.style.bottom = 'auto';
+    sheet.style.left = '0';
+    sheet.style.right = '0';
+  } else if (sheet) {
+    sheet.style.top = '';
+    sheet.style.height = '';
+    sheet.style.bottom = '';
+    sheet.style.left = '';
+    sheet.style.right = '';
+  }
+  if (gap > 0) {
+    const active = document.activeElement;
+    if (active && active.matches && active.matches('input, textarea, select')) keepFieldVisible(active);
+    return;
+  }
   const bar = document.querySelector('.bottom');
   const h = bar ? bar.offsetHeight : 0;
   if (h && Math.abs(h - barHeightPx) > 1) {
