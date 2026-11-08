@@ -103,7 +103,7 @@
     <label class="field">Google-Schlüssel (Places API, optional)
       <div class="keyrow"><input type="password" id="googleKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="nur auf diesem Gerät gespeichert"><button class="btn small secondary" type="button" id="toggleKey">👁</button></div>
     </label>
-    <p class="note">Mit Schlüssel kommen Öffnungszeiten, Telefon und Webseite zuerst von Google, sonst aus OpenStreetMap.</p>
+    <p class="note">Mit Schlüssel kommen beim Stopp hinzufügen Vorschläge von Google, für eine Straße oder eine Firma wie ein Autohaus. Öffnungszeiten, Telefon und Webseite kommen dann zuerst von Google, sonst aus OpenStreetMap.</p>
     <label class="check"><input type="checkbox" id="coordLinks"> Navigationslinks mit Koordinaten statt Adressen</label>
     <div class="actions">
       <button class="btn secondary" id="saveSettings">Speichern</button>
@@ -115,10 +115,22 @@
 </main>
 
 <div class="bottom" id="bottomBar">
-  <div id="addRouteStop"></div>
   <div class="bar-actions">
     <button type="button" class="btn addstopbtn" id="addStopBtn" hidden>Stopp hinzufügen</button>
     <button class="btn primary big" id="planBtn">Tour planen</button>
+  </div>
+</div>
+<div id="addSheet" class="sheet" hidden>
+  <div class="sheet-backdrop" data-act="sheet-close"></div>
+  <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="addSheetTitle">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-bar">
+      <button type="button" class="link" data-act="sheet-close">Abbrechen</button>
+      <div class="sheet-title" id="addSheetTitle">Stopp hinzufügen</div>
+    </div>
+    <input id="addSheetInput" placeholder="Straße oder Autohaus" enterkeyhint="search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <p class="note" id="addSheetHint">Straße mit Hausnummer oder Name, zum Beispiel ein Autohaus.</p>
+    <ul class="list sheet-list" id="addSheetList"></ul>
   </div>
 </div>
 <div id="toast" class="toast" hidden></div>

@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v22';
+const VERSION = 'tp-v23';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1689,14 +1689,14 @@ function openStopEdit(index) {
   renderResult();
   focusRouteEdit();
   const row = document.querySelector(`#routeList .rstop[data-i="${index}"]`);
-  if (row) row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  if (row) row.scrollIntoView({ block: 'nearest' });
 }
 function editFirstStop() {
   if (!state.result || !state.result.stops || state.result.stops.length < 2) return;
   pickFirst = true;
   renderResult();
   const host = $('#firstStop');
-  if (host) host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  if (host) host.scrollIntoView({ block: 'nearest' });
 }
 function firstStopBox(res) {
   const host = $('#firstStop');
@@ -1821,45 +1821,169 @@ async function planOpenTail(res, extras) {
   return prev;
 }
 function addStopBox() {
-  const host = $('#addRouteStop');
   const btn = $('#addStopBtn');
-  if (!host) return;
-  if (!state.result) { host.innerHTML = ''; addStopOpen = false; if (btn) btn.hidden = true; return; }
-  if (!addStopOpen) { host.innerHTML = ''; if (btn) btn.hidden = false; return; }
-  if (btn) btn.hidden = true;
-  if (host.querySelector('#addStopText')) return;
-  host.innerHTML = `<div class="addstop">
-    <input id="addStopText" placeholder="Straße Nr., PLZ Ort" enterkeyhint="done" autocomplete="off">
-    <div class="row"><button type="button" class="btn" data-act="confirm-add">Hinzufügen</button><button type="button" class="btn secondary" data-act="cancel-add">Abbrechen</button></div>
-  </div>`;
+  if (!btn) return;
+  if (!state.result) { btn.hidden = true; addStopOpen = false; }
+  else btn.hidden = false;
+  if (!addStopOpen) closeAddSheet();
 }
-async function confirmAddStop() {
+let addSheetToken = '';
+let addSheetTimer = 0;
+let addSheetAbort = null;
+let addSheetSeq = 0;
+let addSheetHits = [];
+let sheetScrollY = 0;
+const ADDR_TYPES = new Set(['street_address', 'route', 'premise', 'subpremise', 'geocode', 'plus_code', 'political', 'postal_code', 'locality', 'postal_town', 'country', 'administrative_area_level_1', 'administrative_area_level_2', 'administrative_area_level_3', 'neighborhood', 'sublocality', 'sublocality_level_1', 'intersection']);
+function closeAddSheet() {
+  const sheet = $('#addSheet');
+  const open = !!(sheet && !sheet.hidden);
+  clearTimeout(addSheetTimer);
+  if (addSheetAbort) { addSheetAbort.abort(); addSheetAbort = null; }
+  if (sheet) sheet.hidden = true;
+  document.documentElement.classList.remove('sheet-open');
+  if (!open) return;
+  addSheetHits = [];
+  const y = sheetScrollY;
+  requestAnimationFrame(() => { if (Math.abs(window.scrollY - y) > 1) window.scrollTo(0, y); });
+}
+function openAddSheet() {
+  if (!state.result || routeSaving) return;
+  if (!String(settings.googleKey || '').trim()) {
+    toast('Für Vorschläge fehlt der Google-Schlüssel. Trag ihn in den Einstellungen ein.', 5500);
+    openSettings();
+    return;
+  }
+  addStopOpen = true;
+  addSheetToken = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (uid() + uid());
+  addSheetHits = [];
+  addSheetSeq++;
+  const sheet = $('#addSheet');
+  const input = $('#addSheetInput');
+  const list = $('#addSheetList');
+  const hint = $('#addSheetHint');
+  if (!sheet || !input || !list) return;
+  input.value = '';
+  list.innerHTML = '';
+  if (hint) { hint.hidden = false; hint.textContent = 'Straße mit Hausnummer oder Name, zum Beispiel ein Autohaus.'; }
+  sheetScrollY = window.scrollY;
+  sheet.hidden = false;
+  document.documentElement.classList.add('sheet-open');
+  syncBarSpace();
+  input.focus({ preventScroll: true });
+  if (window.scrollY !== sheetScrollY) window.scrollTo(0, sheetScrollY);
+}
+function googlePlacesError(status) {
+  if (status === 400 || status === 403) return 'Der Google-Schlüssel wird nicht akzeptiert. Bitte in den Einstellungen prüfen.';
+  return 'Google-Vorschläge gerade nicht erreichbar.';
+}
+async function googlePlaces(url, opt) {
+  const key = String(settings.googleKey || '').trim();
+  if (!key) { const e = new Error('nokey'); e.code = 'nokey'; throw e; }
+  const headers = Object.assign({ 'X-Goog-Api-Key': key }, (opt && opt.headers) || {});
+  const r = await fetch(url, Object.assign({}, opt || {}, { headers }));
+  if (!r.ok) { const e = new Error(googlePlacesError(r.status)); e.status = r.status; throw e; }
+  return r.json();
+}
+async function placesSuggest(input, signal) {
+  const body = { input, languageCode: 'de', regionCode: 'DE', includedRegionCodes: ['de'], sessionToken: addSheetToken };
+  const home = state.result && routeStart(state.result);
+  if (home && hasPos(home)) body.locationBias = { circle: { center: { latitude: +home.lat, longitude: +home.lon }, radius: 30000 } };
+  const j = await googlePlaces('https://places.googleapis.com/v1/places:autocomplete', {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', 'X-Goog-FieldMask': 'suggestions.placePrediction.placeId,suggestions.placePrediction.place,suggestions.placePrediction.text,suggestions.placePrediction.structuredFormat,suggestions.placePrediction.types' },
+    body: JSON.stringify(body)
+  });
+  return (j.suggestions || []).map(s => {
+    const p = s.placePrediction || {};
+    const placeId = p.placeId || String(p.place || '').replace(/^places\//, '');
+    const main = (p.structuredFormat && p.structuredFormat.mainText && p.structuredFormat.mainText.text) || (p.text && p.text.text) || '';
+    const sub = (p.structuredFormat && p.structuredFormat.secondaryText && p.structuredFormat.secondaryText.text) || '';
+    return placeId && main ? { placeId, main, sub } : null;
+  }).filter(Boolean);
+}
+function paintSuggestions() {
+  const list = $('#addSheetList');
+  const hint = $('#addSheetHint');
+  if (!list) return;
+  if (!addSheetHits.length) {
+    list.innerHTML = '';
+    if (hint) { hint.hidden = false; hint.textContent = 'Nichts gefunden.'; }
+    return;
+  }
+  if (hint) hint.hidden = true;
+  list.innerHTML = addSheetHits.map((s, i) => `<li><button type="button" class="suggest" data-i="${i}"><span class="suggest-main">${esc(s.main)}</span>${s.sub ? `<span class="suggest-sub">${esc(s.sub)}</span>` : ''}</button></li>`).join('');
+}
+function scheduleSuggest() {
+  clearTimeout(addSheetTimer);
+  const q = ($('#addSheetInput') && $('#addSheetInput').value || '').trim();
+  const hint = $('#addSheetHint');
+  if (q.length < 2) {
+    addSheetSeq++;
+    if (addSheetAbort) { addSheetAbort.abort(); addSheetAbort = null; }
+    addSheetHits = [];
+    const list = $('#addSheetList');
+    if (list) list.innerHTML = '';
+    if (hint) { hint.hidden = false; hint.textContent = 'Straße mit Hausnummer oder Name, zum Beispiel ein Autohaus.'; }
+    return;
+  }
+  if (hint) { hint.hidden = false; hint.textContent = 'Suche …'; }
+  addSheetTimer = setTimeout(() => runSuggest(q), 280);
+}
+async function runSuggest(q) {
+  const seq = ++addSheetSeq;
+  if (addSheetAbort) addSheetAbort.abort();
+  const ac = new AbortController();
+  addSheetAbort = ac;
+  try {
+    const hits = await placesSuggest(q, ac.signal);
+    if (seq !== addSheetSeq) return;
+    addSheetHits = hits;
+    paintSuggestions();
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    if (seq !== addSheetSeq) return;
+    addSheetHits = [];
+    const list = $('#addSheetList');
+    if (list) list.innerHTML = '';
+    const hint = $('#addSheetHint');
+    if (hint) { hint.hidden = false; hint.textContent = e.code === 'nokey' ? 'Für Vorschläge fehlt der Google-Schlüssel. Trag ihn in den Einstellungen ein.' : (e.status ? e.message : 'Google-Vorschläge gerade nicht erreichbar.'); }
+  }
+}
+async function placeDetails(placeId) {
+  const url = 'https://places.googleapis.com/v1/places/' + encodeURIComponent(placeId) + '?sessionToken=' + encodeURIComponent(addSheetToken);
+  return googlePlaces(url, { headers: { 'X-Goog-FieldMask': 'id,displayName,formattedAddress,location,addressComponents,types' } });
+}
+function stopFromPlace(p) {
+  const comps = p.addressComponents || [];
+  const pick = (...types) => {
+    const c = comps.find(x => (x.types || []).some(t => types.includes(t)));
+    return c ? (c.longText || c.shortText || '') : '';
+  };
+  let strasse = [pick('route'), pick('street_number')].filter(Boolean).join(' ').trim();
+  const plz = pick('postal_code');
+  const ort = pick('locality') || pick('postal_town') || pick('administrative_area_level_3') || pick('sublocality') || '';
+  const name = (p.displayName && p.displayName.text) || '';
+  const business = (p.types || []).some(t => !ADDR_TYPES.has(t));
+  if (!strasse && p.formattedAddress) strasse = String(p.formattedAddress).split(',')[0].trim();
+  if (!business && !strasse) strasse = name;
+  const lat = p.location && +p.location.latitude;
+  const lon = p.location && +p.location.longitude;
+  return {
+    id: uid(), auftrag: '', kategorie: '', datum: '',
+    kunde: business ? name : '',
+    plz, ort, strasse, typ: '', betrag: '',
+    geo: Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon, approx: false } : null,
+    geoErr: null, onsite: null, done: null
+  };
+}
+async function commitExtraStops(extras) {
   const res = state.result;
-  const text = ($('#addStopText') && $('#addStopText').value || '').trim();
-  if (!res || routeSaving) return;
-  if (!text) { toast('Bitte eine Adresse eingeben.'); return; }
-  let parsed = parseOrders(text);
-  if (!parsed.length) parsed = text.split(/\n/).map(parseManualLine).filter(Boolean);
-  if (!parsed.length) { toast('Adresse nicht erkannt.'); return; }
-  const known = new Set((res.stops || []).map(s => String(s.auftrag || '').trim()).filter(Boolean));
-  parsed = parsed.filter(o => !o.auftrag || !known.has(String(o.auftrag).trim()));
-  if (!parsed.length) { toast('Dieser Auftrag ist schon in der Route.'); return; }
+  if (!res || routeSaving || !extras || !extras.length) return false;
   routeSaving = true;
   const planBtn = $('#planBtn');
-  if (planBtn) { planBtn.disabled = true; planBtn.textContent = 'Suche Adresse …'; }
+  if (planBtn) { planBtn.disabled = true; planBtn.textContent = 'Berechne Reihenfolge …'; }
   const prev = res.stops.slice();
   try {
-    const extras = [];
-    for (let i = 0; i < parsed.length; i++) {
-      if (planBtn) planBtn.textContent = `Suche Adresse … ${i + 1}/${parsed.length}`;
-      const neu = Object.assign({ id: uid(), auftrag: '', kategorie: '', datum: '', kunde: '', plz: '', ort: '', strasse: '', typ: '', betrag: '', geo: null, geoErr: null, onsite: null, done: null }, parsed[i]);
-      const geo = await geocode(neu);
-      if (!geo) throw new Error('Adresse nicht gefunden – bitte Straße, PLZ und Ort prüfen.');
-      neu.geo = geo;
-      applyRememberedDone([neu]);
-      extras.push(neu);
-    }
-    if (planBtn) planBtn.textContent = 'Berechne Reihenfolge …';
     await planOpenTail(res, extras);
     addStopOpen = false;
     mapFor = null;
@@ -1870,13 +1994,38 @@ async function confirmAddStop() {
     renderResult();
     renderTours();
     toast(extras.length === 1 ? 'Stopp hinzugefügt. Offene Stopps neu geplant.' : `${extras.length} Stopps hinzugefügt. Offene Stopps neu geplant.`);
+    return true;
   } catch (e) {
     res.stops = prev;
     renderResult();
     toast(e.message || 'Stopp konnte nicht hinzugefügt werden.', 5000);
+    return false;
   } finally {
     routeSaving = false;
     if (planBtn) { planBtn.disabled = false; planBtn.textContent = 'Tour planen'; }
+  }
+}
+async function chooseSuggestion(i) {
+  const hit = addSheetHits[i];
+  if (!hit || routeSaving) return;
+  const hint = $('#addSheetHint');
+  if (hint) { hint.hidden = false; hint.textContent = 'Wird hinzugefügt …'; }
+  const buttons = $('#addSheetList') ? $('#addSheetList').querySelectorAll('button') : [];
+  buttons.forEach(b => { b.disabled = true; });
+  try {
+    const place = await placeDetails(hit.placeId);
+    const neu = stopFromPlace(place);
+    if (!neu || !neu.geo) throw new Error('Dieser Ort hat keinen Standort.');
+    applyRememberedDone([neu]);
+    const ok = await commitExtraStops([neu]);
+    if (!ok && addStopOpen) {
+      if (hint) hint.textContent = 'Bitte einen Vorschlag wählen.';
+      buttons.forEach(b => { b.disabled = false; });
+    }
+  } catch (e) {
+    if (hint && addStopOpen) hint.textContent = 'Bitte einen Vorschlag wählen.';
+    buttons.forEach(b => { b.disabled = false; });
+    toast(e && e.name !== 'TypeError' && e.message ? e.message : 'Google-Vorschläge gerade nicht erreichbar.', 5000);
   }
 }
 async function removeRouteStop(index) {
@@ -2043,7 +2192,7 @@ function collectDriverFields() {
   });
   if (def && settings.drivers[+def.value]) settings.defaultDriver = settings.drivers[+def.value].name;
 }
-function openSettings() { renderDriverFields(); const d = $('#settings'); d.open = true; d.scrollIntoView({ behavior: 'smooth' }); }
+function openSettings() { renderDriverFields(); const d = $('#settings'); d.open = true; d.scrollIntoView({ block: 'nearest' }); }
 
 /* ---------------- Events ---------------- */
 function bindStopSwipe(list) {
@@ -2222,18 +2371,26 @@ function bind() {
     if (!drafting()) saveResult();
     renderResult();
   });
-  $('#addStopBtn').addEventListener('click', () => {
-    if (!state.result) return;
-    addStopOpen = true;
-    addStopBox();
-    syncBarSpace();
-    const inp = $('#addStopText');
-    if (inp) inp.focus({ preventScroll: true });
+  $('#addStopBtn').addEventListener('click', openAddSheet);
+  const addSheet = $('#addSheet');
+  if (addSheet) addSheet.addEventListener('click', e => {
+    if (e.target.closest('[data-act="sheet-close"]')) { addStopOpen = false; closeAddSheet(); return; }
+    const pick = e.target.closest('.suggest');
+    if (pick) chooseSuggestion(+pick.dataset.i);
   });
-  $('#addRouteStop').addEventListener('click', e => {
-    const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'cancel-add') { addStopOpen = false; addStopBox(); syncBarSpace(); }
-    else if (act === 'confirm-add') confirmAddStop();
+  const addSheetInput = $('#addSheetInput');
+  if (addSheetInput) addSheetInput.addEventListener('input', scheduleSuggest);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && addStopOpen) { addStopOpen = false; closeAddSheet(); }
+  });
+  document.addEventListener('touchmove', e => {
+    if (!document.documentElement.classList.contains('sheet-open')) return;
+    if (e.target.closest && e.target.closest('.sheet-panel')) return;
+    e.preventDefault();
+  }, { passive: false });
+  window.addEventListener('scroll', () => {
+    if (!document.documentElement.classList.contains('sheet-open')) return;
+    if (Math.abs(window.scrollY - sheetScrollY) > 1) window.scrollTo(0, sheetScrollY);
   });
   $('#routeSave').addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
@@ -2446,12 +2603,21 @@ function lockPageZoom() {
     if (e.touches && e.touches.length > 1) block(e);
   }, { passive: false });
 }
+let barGapPx = -1, barHeightPx = -1;
 function syncBarSpace() {
   const vv = window.visualViewport;
-  const gap = vv ? Math.max(0, window.innerHeight - vv.offsetTop - vv.height) : 0;
-  document.documentElement.style.setProperty('--vv-bottom', gap + 'px');
+  const gap = vv ? Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height)) : 0;
+  if (gap !== barGapPx) {
+    barGapPx = gap;
+    document.documentElement.style.setProperty('--vv-bottom', gap + 'px');
+  }
+  if (gap > 0) return;
   const bar = document.querySelector('.bottom');
-  if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px');
+  const h = bar ? bar.offsetHeight : 0;
+  if (h && Math.abs(h - barHeightPx) > 1) {
+    barHeightPx = h;
+    document.documentElement.style.setProperty('--bar-h', h + 'px');
+  }
 }
 function pinBottomBar() {
   syncBarSpace();
