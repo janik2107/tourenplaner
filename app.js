@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v20';
+const VERSION = 'tp-v21';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1453,6 +1453,7 @@ function abandonDraft() {
   draftSnapshot = null;
   draftUndo = new Set();
   pickFirst = false;
+  addStopOpen = false;
 }
 function beginDraft(saved) {
   if (!saved) return;
@@ -1460,6 +1461,7 @@ function beginDraft(saved) {
   draftId = saved.id;
   draftUndo = new Set();
   pickFirst = false;
+  addStopOpen = false;
   state.result = cloneTour(saved);
   routeEdit = null;
   saveState();
@@ -1629,6 +1631,7 @@ async function saveRouteStop(li) {
 
 let routeEdit = null;      // 'start' | 'dest' | 'stop|<i>' – nur die Ansicht, wird nicht gespeichert
 let pickFirst = false;
+let addStopOpen = false;
 let routeEditTour = null;
 let routeSaving = false;
 function keepRouteEditing(fn) {
@@ -1770,6 +1773,112 @@ async function makeFirstStop(index) {
     if (planBtn) { planBtn.disabled = false; planBtn.textContent = 'Tour planen'; }
   }
 }
+async function planOpenTail(res, extras) {
+  const prev = res.stops.slice();
+  const done = [];
+  const open = [];
+  for (const s of prev) (doneStamp(s.done) ? done : open).push(s);
+  for (const s of extras) (doneStamp(s.done) ? done : open).push(s);
+  const home = routeStart(res), goal = routeEnd(res);
+  if (!hasPos(home) || !hasPos(goal)) throw new Error('Start oder Ziel fehlt.');
+  if ([...done, ...open].some(s => !s.geo || !hasPos(s.geo))) throw new Error('Ein Stopp hat keinen Standort.');
+  let orderedOpen = open.slice();
+  if (open.length) {
+    const endPt = { lat: +goal.lat, lon: +goal.lon };
+    const anchor = done.length
+      ? { lat: +done[done.length - 1].geo.lat, lon: +done[done.length - 1].geo.lon }
+      : { lat: +home.lat, lon: +home.lon };
+    const anchorIsEnd = !done.length && Math.abs(anchor.lat - endPt.lat) < 1e-5 && Math.abs(anchor.lon - endPt.lon) < 1e-5;
+    if (anchorIsEnd) {
+      const pts = [endPt, ...open.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon }))];
+      const T = await osrmTable(pts);
+      const order = solveTour(T.dur, -1);
+      orderedOpen = order.map(i => open[i - 1]);
+    } else {
+      const pts = [endPt, ...open.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon })), anchor];
+      const anchorIdx = pts.length - 1;
+      const T = await osrmTable(pts);
+      const order = solveTour(T.dur, anchorIdx);
+      if (!order.length || order[0] !== anchorIdx) throw new Error('Reihenfolge konnte nicht berechnet werden.');
+      orderedOpen = order.slice(1).map(i => open[i - 1]);
+    }
+    if (orderedOpen.length !== open.length || orderedOpen.some(s => !s)) throw new Error('Reihenfolge konnte nicht berechnet werden.');
+  }
+  res.stops = done.concat(orderedOpen);
+  const seq = [{ lat: +home.lat, lon: +home.lon }, ...res.stops.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon })), { lat: +goal.lat, lon: +goal.lon }];
+  try {
+    const r = await osrmRoute(seq);
+    res.legs = r.legs;
+    res.geometry = r.geometry;
+  } catch {
+    const T2 = await osrmTable(seq);
+    res.legs = [];
+    for (let i = 0; i < seq.length - 1; i++) res.legs.push({ dur: T2.dur[i][i + 1] || 0, dist: T2.dist[i][i + 1] || 0 });
+    res.geometry = null;
+  }
+  res.totalDur = res.legs.reduce((a, l) => a + (Number(l.dur) || 0), 0);
+  res.totalDist = res.legs.reduce((a, l) => a + (Number(l.dist) || 0), 0);
+  return prev;
+}
+function addStopBox() {
+  const host = $('#addRouteStop');
+  if (!host) return;
+  if (!state.result) { host.innerHTML = ''; addStopOpen = false; return; }
+  if (!addStopOpen) {
+    host.innerHTML = `<button type="button" class="btn addstopbtn" data-act="show-add">Stopp hinzufügen</button>`;
+    return;
+  }
+  host.innerHTML = `<div class="addstop">
+    <input id="addStopText" placeholder="Straße Nr., PLZ Ort" enterkeyhint="done" autocomplete="off">
+    <div class="row"><button type="button" class="btn" data-act="confirm-add">Hinzufügen</button><button type="button" class="btn secondary" data-act="cancel-add">Abbrechen</button></div>
+  </div>`;
+}
+async function confirmAddStop() {
+  const res = state.result;
+  const text = ($('#addStopText') && $('#addStopText').value || '').trim();
+  if (!res || routeSaving) return;
+  if (!text) { toast('Bitte eine Adresse eingeben.'); return; }
+  let parsed = parseOrders(text);
+  if (!parsed.length) parsed = text.split(/\n/).map(parseManualLine).filter(Boolean);
+  if (!parsed.length) { toast('Adresse nicht erkannt.'); return; }
+  const known = new Set((res.stops || []).map(s => String(s.auftrag || '').trim()).filter(Boolean));
+  parsed = parsed.filter(o => !o.auftrag || !known.has(String(o.auftrag).trim()));
+  if (!parsed.length) { toast('Dieser Auftrag ist schon in der Route.'); return; }
+  routeSaving = true;
+  const planBtn = $('#planBtn');
+  if (planBtn) { planBtn.disabled = true; planBtn.textContent = 'Suche Adresse …'; }
+  const prev = res.stops.slice();
+  try {
+    const extras = [];
+    for (let i = 0; i < parsed.length; i++) {
+      if (planBtn) planBtn.textContent = `Suche Adresse … ${i + 1}/${parsed.length}`;
+      const neu = Object.assign({ id: uid(), auftrag: '', kategorie: '', datum: '', kunde: '', plz: '', ort: '', strasse: '', typ: '', betrag: '', geo: null, geoErr: null, onsite: null, done: null }, parsed[i]);
+      const geo = await geocode(neu);
+      if (!geo) throw new Error('Adresse nicht gefunden – bitte Straße, PLZ und Ort prüfen.');
+      neu.geo = geo;
+      applyRememberedDone([neu]);
+      extras.push(neu);
+    }
+    if (planBtn) planBtn.textContent = 'Berechne Reihenfolge …';
+    await planOpenTail(res, extras);
+    addStopOpen = false;
+    mapFor = null;
+    routeEdit = null;
+    saveState();
+    saveResult(res);
+    renderStops();
+    renderResult();
+    renderTours();
+    toast(extras.length === 1 ? 'Stopp hinzugefügt. Offene Stopps neu geplant.' : `${extras.length} Stopps hinzugefügt. Offene Stopps neu geplant.`);
+  } catch (e) {
+    res.stops = prev;
+    renderResult();
+    toast(e.message || 'Stopp konnte nicht hinzugefügt werden.', 5000);
+  } finally {
+    routeSaving = false;
+    if (planBtn) { planBtn.disabled = false; planBtn.textContent = 'Tour planen'; }
+  }
+}
 async function removeRouteStop(index) {
   if (routeSaving || !state.result || !state.result.stops || !state.result.stops[index]) return;
   const res = state.result;
@@ -1809,8 +1918,8 @@ function routeSaveBox() {
 function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInner)); }
 function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
-  if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; const host = $('#firstStop'); if (host) host.innerHTML = ''; const saveHost = $('#routeSave'); if (saveHost) saveHost.innerHTML = ''; return; }
-  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; pickFirst = false; }
+  if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; const host = $('#firstStop'); if (host) host.innerHTML = ''; const saveHost = $('#routeSave'); if (saveHost) saveHost.innerHTML = ''; addStopOpen = false; addStopBox(); return; }
+  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; pickFirst = false; addStopOpen = false; }
   if (applyRememberedDone(res.stops)) saveResult(res);
   sec.hidden = false;
   const S = computeSchedule(res);
@@ -1864,6 +1973,7 @@ function renderResultInner() {
   const endTitle = hasExplicitDest(res) ? 'Ziel' : 'Zurück nach Hause';
   rows.push(`<li class="stop rstop"><div class="badge" style="background:var(--green);color:#000">${hasExplicitDest(res) ? 'Z' : '⌂'}</div><div class="eta">${hasExplicitDest(res) ? 'Ziel ca.' : 'Zurück ca.'} <b>${hhmm(S.homeArr)}</b></div><div class="k">${endTitle}</div><div class="a">${esc(pointLabel(routeEnd(res)))}</div><div class="leg">🚗 ${fmtMin(lb.dur)} · ${fmtKm(lb.dist)}</div>
     <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(endPt))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(endPt))}">Apple Karten</a></div></li>`);
+  addStopBox();
   $('#routeList').innerHTML = rows.join('');
   if (mapFor !== res.id) { mapFor = res.id; renderMap(res); }
 }
@@ -2111,6 +2221,12 @@ function bind() {
     state.result.startTime = e.target.value || settings.startTime;
     if (!drafting()) saveResult();
     renderResult();
+  });
+  $('#addRouteStop').addEventListener('click', e => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'show-add') { addStopOpen = true; renderResult(); const inp = $('#addStopText'); if (inp) inp.focus(); }
+    else if (act === 'cancel-add') { addStopOpen = false; renderResult(); }
+    else if (act === 'confirm-add') confirmAddStop();
   });
   $('#routeSave').addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
