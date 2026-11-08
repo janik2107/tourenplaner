@@ -66,7 +66,6 @@
     <div class="nextbox" id="nextBox" hidden></div>
     <div id="map"></div>
     <div class="navbtns" id="routeBtns"></div>
-    <div id="addRouteStop"></div>
     <p class="note swipehint">Nach rechts wischen: bearbeiten. Nach links wischen: entfernen.</p>
     <ul class="list route" id="routeList"></ul>
     <p class="note">Ankunftszeiten sind Schätzungen ohne Verkehr (Fahrzeit + eingestellte Zeit vor Ort). Öffnungszeiten aus OpenStreetMap – können fehlen oder veraltet sein. Routing: OSRM.</p>
@@ -115,8 +114,12 @@
   <div class="spacer"></div>
 </main>
 
-<div class="bottom">
-  <button class="btn primary big" id="planBtn">Tour planen</button>
+<div class="bottom" id="bottomBar">
+  <div id="addRouteStop"></div>
+  <div class="bar-actions">
+    <button type="button" class="btn addstopbtn" id="addStopBtn" hidden>Stopp hinzufügen</button>
+    <button class="btn primary big" id="planBtn">Tour planen</button>
+  </div>
 </div>
 <div id="toast" class="toast" hidden></div>
 <div id="printSheet" class="print-sheet" aria-hidden="true"></div>
