@@ -99,17 +99,23 @@ textarea:focus,input:focus{outline:2px solid var(--blue)}
 .field input{margin-top:4px}
 .check{display:flex;gap:8px;align-items:center;font-size:15px;margin:12px 0}
 .spacer{height:calc(var(--bar-h) + 16px + var(--vv-bottom))}
-.bottom{position:fixed;left:0;right:0;bottom:var(--vv-bottom);z-index:30;padding:var(--bar-pad) 16px calc(var(--bar-pad) + var(--safe-b));background:#000;border-top:1px solid var(--sep)}
-.bottom .btn{max-width:608px;min-height:var(--bar-btn);margin:0 auto;display:flex}
+.bottom{position:fixed;left:0;right:0;bottom:var(--vv-bottom);z-index:30;display:flex;flex-direction:column;gap:8px;padding:var(--bar-pad) 16px calc(var(--bar-pad) + var(--safe-b));background:#000;border-top:1px solid var(--sep)}
+.bottom .bar-actions{display:flex;gap:8px;align-items:stretch}
+.bottom .bar-actions .btn{flex:1 1 0;width:auto;min-width:0;max-width:none;min-height:var(--bar-btn);margin:0;white-space:normal;line-height:1.15;padding:12px 8px}
+.bottom #addRouteStop:empty{display:none}
+.bottom .addstop{margin:0}
+.bottom .addstop input{font-size:16px;min-height:44px}
 .toast{position:fixed;left:16px;right:16px;bottom:calc(var(--bar-h) + 12px + var(--vv-bottom));background:#3a3a3c;color:#fff;padding:12px 14px;border-radius:12px;font-size:15px;text-align:center;max-width:600px;margin:0 auto;box-shadow:0 6px 24px rgba(0,0,0,.5);z-index:40}
 
 .drv{border-top:1px solid var(--sep);padding-top:10px;margin-top:12px}
 .drv:first-child{border-top:0;margin-top:8px}
 .drv-head{display:flex;justify-content:space-between;align-items:center;font-size:15px}
 
-.tourctl{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:-2px 0 12px;font-size:15px;color:var(--sub);flex-wrap:wrap}
-.tourctl b{color:var(--text)}
-.tourctl input{width:auto;padding:6px 8px;margin-left:6px;font-size:16px}
+.tourctl{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;align-items:end;margin:0 0 12px}
+.tourctl label{display:flex;flex-direction:column;gap:4px;min-width:0;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
+.tourctl input{width:100%;max-width:100%;margin:0;min-height:44px;padding:8px 10px;font-size:16px}
+.tourctl .back{grid-column:1/-1;font-size:16px;color:var(--sub)}
+.tourctl .back b{color:var(--text)}
 .nextbox{background:linear-gradient(135deg,#0a3d80,#0a84ff);border-radius:12px;padding:12px 14px;margin-bottom:12px}
 .nb-l{font-size:12px;text-transform:uppercase;letter-spacing:.6px;opacity:.85}
 .nb-t{font-size:17px;font-weight:600;margin-top:2px}

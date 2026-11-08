@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v21';
+const VERSION = 'tp-v22';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1822,12 +1822,12 @@ async function planOpenTail(res, extras) {
 }
 function addStopBox() {
   const host = $('#addRouteStop');
+  const btn = $('#addStopBtn');
   if (!host) return;
-  if (!state.result) { host.innerHTML = ''; addStopOpen = false; return; }
-  if (!addStopOpen) {
-    host.innerHTML = `<button type="button" class="btn addstopbtn" data-act="show-add">Stopp hinzufügen</button>`;
-    return;
-  }
+  if (!state.result) { host.innerHTML = ''; addStopOpen = false; if (btn) btn.hidden = true; return; }
+  if (!addStopOpen) { host.innerHTML = ''; if (btn) btn.hidden = false; return; }
+  if (btn) btn.hidden = true;
+  if (host.querySelector('#addStopText')) return;
   host.innerHTML = `<div class="addstop">
     <input id="addStopText" placeholder="Straße Nr., PLZ Ort" enterkeyhint="done" autocomplete="off">
     <div class="row"><button type="button" class="btn" data-act="confirm-add">Hinzufügen</button><button type="button" class="btn secondary" data-act="cancel-add">Abbrechen</button></div>
@@ -1915,7 +1915,7 @@ function routeSaveBox() {
     <button type="button" class="btn savebtn" data-act="save-route">Speichern</button>
     <button type="button" class="btn secondary discardbtn" data-act="discard-route">Verwerfen</button>`;
 }
-function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInner)); }
+function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInner)); syncBarSpace(); }
 function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
   if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; const host = $('#firstStop'); if (host) host.innerHTML = ''; const saveHost = $('#routeSave'); if (saveHost) saveHost.innerHTML = ''; addStopOpen = false; addStopBox(); return; }
@@ -1926,7 +1926,7 @@ function renderResultInner() {
   const doneN = res.stops.filter(s => s.done).length;
   $('#resultMeta').textContent = res.name ? (res.datum ? `${res.name} · ${res.datum}` : res.name) : `${res.driverName} · ${res.datum}`;
   $('#totals').innerHTML = `<div><b>${fmtKm(res.totalDist)}</b><span>Strecke</span></div><div><b>${fmtMin(res.totalDur).replace(' Min.', ' m').replace(' Std.', ' h')}</b><span>Fahrzeit</span></div><div><b>${doneN ? doneN + '/' : ''}${res.stops.length}</b><span>${doneN ? 'erledigt' : 'Stopps'}</span></div>`;
-  $('#tourCtl').innerHTML = `<label>Datum <input type="date" id="tourDate" value="${esc(datumToInput(res.datum))}"></label><label>Abfahrt <input type="time" id="tourStart" value="${esc(res.startTime || settings.startTime)}"></label><span>Zurück ca. <b>${hhmm(S.homeArr)}</b></span>`;
+  $('#tourCtl').innerHTML = `<label>Datum<input type="date" id="tourDate" value="${esc(datumToInput(res.datum))}"></label><label>Abfahrt<input type="time" id="tourStart" value="${esc(res.startTime || settings.startTime)}"></label><span class="back">Zurück ca. <b>${hhmm(S.homeArr)}</b></span>`;
   routeSaveBox();
   const pts = routePoints(res);
   // Nächster Stopp
@@ -2222,10 +2222,17 @@ function bind() {
     if (!drafting()) saveResult();
     renderResult();
   });
+  $('#addStopBtn').addEventListener('click', () => {
+    if (!state.result) return;
+    addStopOpen = true;
+    addStopBox();
+    syncBarSpace();
+    const inp = $('#addStopText');
+    if (inp) inp.focus({ preventScroll: true });
+  });
   $('#addRouteStop').addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'show-add') { addStopOpen = true; renderResult(); const inp = $('#addStopText'); if (inp) inp.focus(); }
-    else if (act === 'cancel-add') { addStopOpen = false; renderResult(); }
+    if (act === 'cancel-add') { addStopOpen = false; addStopBox(); syncBarSpace(); }
     else if (act === 'confirm-add') confirmAddStop();
   });
   $('#routeSave').addEventListener('click', e => {
@@ -2439,16 +2446,18 @@ function lockPageZoom() {
     if (e.touches && e.touches.length > 1) block(e);
   }, { passive: false });
 }
+function syncBarSpace() {
+  const vv = window.visualViewport;
+  const gap = vv ? Math.max(0, window.innerHeight - vv.offsetTop - vv.height) : 0;
+  document.documentElement.style.setProperty('--vv-bottom', gap + 'px');
+  const bar = document.querySelector('.bottom');
+  if (bar) document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px');
+}
 function pinBottomBar() {
-  const apply = () => {
-    const vv = window.visualViewport;
-    const gap = vv ? Math.max(0, window.innerHeight - vv.offsetTop - vv.height) : 0;
-    document.documentElement.style.setProperty('--vv-bottom', gap + 'px');
-  };
-  apply();
+  syncBarSpace();
   if (!window.visualViewport) return;
-  window.visualViewport.addEventListener('resize', apply);
-  window.visualViewport.addEventListener('scroll', apply);
+  window.visualViewport.addEventListener('resize', syncBarSpace);
+  window.visualViewport.addEventListener('scroll', syncBarSpace);
 }
 lockPageZoom();
 pinBottomBar();
