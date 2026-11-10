@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v24';
+const VERSION = 'tp-v25';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -157,6 +157,9 @@ function draftKey(s) {
   return id || String(s.auftrag || '').trim();
 }
 const saveState = () => LS.set('tp_state', { driver: state.driver, stops: state.stops, firstId: state.firstId, result: drafting() ? draftSnapshot : state.result });
+function todayDatum() {
+  return new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
 function datumToInput(d) {
   const m = String(d || '').match(/(\d{2})\.(\d{2})\.(\d{4})/);
   return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
@@ -1495,6 +1498,42 @@ function discardDraft() {
   renderResult();
   toast('Änderungen verworfen. Die gespeicherte Route bleibt.');
 }
+// Nur der Erledigt-Haken (und die Uhrzeit) geht sofort in die gespeicherte Tour.
+// Datum, Reihenfolge, Start/Ziel und neue Stopps des Entwurfs bleiben ungespeichert.
+function persistDoneToggle(stop) {
+  const res = state.result;
+  if (!res || !stop) return;
+  const ts = doneStamp(stop.done);
+  if (ts) { rememberDoneStop(stop); saveDoneMemory(); }
+  else if (!doneElsewhere(stop, res.id)) forgetDoneStop(stop);
+  if (draftSnapshot && Array.isArray(draftSnapshot.stops)) {
+    const snap = draftSnapshot.stops.find(s => sameStop(s, stop));
+    if (snap) snap.done = ts;
+  }
+  if (!Array.isArray(tours)) tours = [];
+  let saved = tours.find(t => t && String(t.id) === String(res.id));
+  if (!saved) {
+    const base = drafting() && draftSnapshot ? cloneTour(draftSnapshot) : cloneTour(res);
+    if (!base.id) base.id = res.id || uid();
+    if (!base.datum) base.datum = todayDatum();
+    if (!res.datum) res.datum = base.datum;
+    const target = (base.stops || []).find(s => sameStop(s, stop));
+    if (target) target.done = ts;
+    base.updated = Date.now();
+    tours.unshift(base);
+    tours = tours.slice(0, 20);
+    LS.set('tp_tours', tours);
+    saved = tours.find(t => t && String(t.id) === String(base.id));
+    if (!drafting() && saved) beginDraft(saved);
+  } else {
+    const target = (saved.stops || []).find(s => sameStop(s, stop));
+    if (target) target.done = ts;
+    if (!saved.datum) saved.datum = todayDatum();
+    saved.updated = Date.now();
+    LS.set('tp_tours', tours);
+  }
+  saveState();
+}
 function saveResult(res) {
   res = res || state.result; if (!res) return;
   if (drafting() && String(res.id) === String(draftId)) {
@@ -2398,13 +2437,14 @@ function bind() {
       const mem = memoryTime(s);
       s.done = mem || Date.now();
       draftUndo.delete(draftKey(s));
-      if (!drafting()) { rememberDoneStop(s); saveDoneMemory(); }
-      toast(`${label(s)} erledigt – Zeiten neu berechnet`);
+      persistDoneToggle(s);
+      toast('Gespeichert', 1600);
     }
     else if (act === 'undo') {
       s.done = null;
-      if (drafting()) draftUndo.add(draftKey(s));
-      else forgetDoneStop(s);
+      draftUndo.delete(draftKey(s));
+      persistDoneToggle(s);
+      toast('Gespeichert', 1600);
     }
     else if (b.dataset.act === 'retryhours') { fetchHoursForResult(state.result, false); return; }
     else return;
