@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v25';
+const VERSION = 'tp-v26';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -15,7 +15,7 @@ const DEFAULT_SETTINGS = {
   defaultDriver: null,
   coordLinks: false,
   startTime: '05:30',   // Standard-Abfahrtszeit
-  onsite: 5             // Standard-Minuten vor Ort je Stopp
+  onsite: 5             // alter Wert bleibt gespeichert, wird nicht mehr gerechnet oder angezeigt
 };
 const KNOWN_CATS = ['WF (DE)', 'AGCO Bl_DE', 'Creditplus', 'DLL Blue', 'Cosmo', 'PF Service', 'Open AG'];
 
@@ -820,21 +820,20 @@ function tourDate(res) {
   const m = (res.datum || '').match(/(\d{2})\.(\d{2})\.(\d{4})/);
   const d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : new Date(); d.setHours(0, 0, 0, 0); return d;
 }
-const onsiteOf = s => (s.onsite != null && s.onsite !== '' ? +s.onsite : (+settings.onsite || 0));
-
-/* Zeitplan: Start + Fahrzeit + Standzeit; nach „Erledigt“ ab Erledigt-Zeitpunkt neu gerechnet */
+/* Zeitplan: nur Abfahrt und Fahrzeit. Nach „Erledigt“ ab der Erledigt-Uhrzeit weiter. */
 function computeSchedule(res) {
   const d = tourDate(res); const [h, m] = (res.startTime || settings.startTime || '05:30').split(':').map(Number);
   let cursor = new Date(d.getTime() + ((h || 0) * 60 + (m || 0)) * 60000);
+  const start = new Date(cursor);
   const rows = res.stops.map((s, i) => {
     const drive = (res.legs[i]?.dur || 0) * 1000;
-    if (s.done) { cursor = new Date(s.done); return { done: true, dep: cursor }; }
-    const arr = new Date(cursor.getTime() + drive), dep = new Date(arr.getTime() + onsiteOf(s) * 60000);
-    cursor = dep; return { done: false, arr, dep };
+    if (s.done) { cursor = new Date(s.done); return { done: true, arr: cursor, dep: cursor }; }
+    const arr = new Date(cursor.getTime() + drive);
+    cursor = arr; return { done: false, arr, dep: arr };
   });
   const homeArr = new Date(cursor.getTime() + (res.legs[res.stops.length]?.dur || 0) * 1000);
   const next = rows.findIndex(r => !r.done);
-  return { rows, homeArr, next };
+  return { rows, homeArr, next, start };
 }
 
 /* ---------------- Öffnungszeiten (OpenStreetMap / Overpass + opening_hours.js) ---------------- */
@@ -1191,7 +1190,7 @@ function routeSheet(res) {
     if (s.typ && /termin/i.test(s.typ)) ord.push(s.typ);
     const lines = [];
     if (r.done) lines.push({ k: 'time', t: 'Erledigt um ' + hhmm(r.dep) });
-    else lines.push({ k: 'time', t: (i === S.next ? 'Als Nächstes · ' : '') + 'Ankunft ca. ' + hhmm(r.arr) + ' · weiter ' + hhmm(r.dep) });
+    else lines.push({ k: 'time', t: (i === S.next ? 'Als Nächstes · ' : '') + 'Ankunft ca. ' + hhmm(r.arr) });
     lines.push({ k: 'ord', t: ord.join(' · ') });
     if (s.kunde) lines.push({ k: 'name', t: s.kunde });
     lines.push({ k: 'addr', t: addrText(s) || 'keine Adresse' });
@@ -1218,7 +1217,7 @@ function routeSheet(res) {
     meta: [res.name, res.driverName || res.driver, res.datum].filter(Boolean).join(' · '),
     sub: 'Abfahrt ' + (res.startTime || settings.startTime || '–') + ' · Zurück ca. ' + hhmm(S.homeArr),
     totals: `${fmtKm(res.totalDist || 0)} · ${fmtMin(res.totalDur || 0)} Fahrzeit · ${doneN ? doneN + '/' : ''}${res.stops.length} ${doneN ? 'erledigt' : 'Stopps'}`,
-    foot: 'Ankunftszeiten sind Schätzungen ohne Verkehr (Fahrzeit + Zeit vor Ort).',
+    foot: 'Ankunftszeiten sind Schätzungen ohne Verkehr, nur die Fahrzeit.',
     blocks
   };
 }
@@ -2195,32 +2194,49 @@ function renderResultInner() {
   html += `<div class="row">${a.map((p, i) => `<a class="btn amaps" target="_blank" rel="noopener" href="${esc(appleUrl(p))}">Apple Karten${a.length > 1 ? ` ${i + 1}/${a.length}` : ''}</a>`).join('')}</div>`;
   html += '<div class="lbl">Apple-Gesamtroute benötigt iOS 18.4 oder neuer. Sonst die Einzel-Links je Stopp verwenden.</div>';
   $('#routeBtns').innerHTML = html;
-  const rows = res.stops.map((s, i) => {
-    const l = res.legs[i] || { dur: 0, dist: 0 }; const p = pts[i + 1], r = S.rows[i], isNext = i === S.next;
-    const eta = r.done ? `<div class="eta done">✓ Erledigt um ${hhmm(r.dep)}</div>`
-      : `<div class="eta">${isNext ? '<span class="nexttag">Als Nächstes</span> ' : ''}Ankunft ca. <b>${hhmm(r.arr)}</b> <span class="muted">· weiter ${hhmm(r.dep)}</span></div>`;
+  const rail = dot => `<div class="rail">${dot || ''}</div>`;
+  const dot = (cls, text) => `<span class="dot ${cls}">${text}</span>`;
+  const legRow = leg => {
+    const l = leg || { dur: 0, dist: 0 };
+    return `<li class="tl-leg"><div class="tl-row">${rail('')}<div class="leg-meta"><b>${fmtMin(l.dur)}</b><span>${fmtKm(l.dist)}</span></div></div></li>`;
+  };
+  const rows = [];
+  rows.push(`<li class="tl-node tl-start"><div class="tl-row">${rail(dot('home', '⌂'))}<div class="tl-card">
+    <div class="tl-kicker">Abfahrt</div>
+    <div class="eta"><b>${hhmm(S.start)}</b></div>
+    <div class="a">${esc(pointLabel(routeStart(res))) || 'Start'}</div>
+  </div></div></li>`);
+  res.stops.forEach((s, i) => {
+    const p = pts[i + 1], r = S.rows[i], isNext = i === S.next;
     const editing = routeEdit === 'stop|' + i;
-    return `<li class="stop rstop swipe${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}">
+    const eta = r.done ? `<div class="eta done">Erledigt <b>${hhmm(r.dep)}</b></div>`
+      : `<div class="eta">${isNext ? '<span class="nexttag">Als Nächstes</span>' : '<span class="tl-kicker">Ankunft</span>'}<b>${hhmm(r.arr)}</b></div>`;
+    rows.push(legRow(res.legs[i]));
+    rows.push(`<li class="stop rstop swipe${r.done ? ' isdone' : ''}${isNext ? ' isnext' : ''}" data-i="${i}">
       <div class="swipe-bg" aria-hidden="true"><span class="swipe-hint edit">Bearbeiten</span><span class="swipe-hint remove">Entfernen</span></div>
-      <div class="swipe-face"><div class="badge">${r.done ? '✓' : i + 1}</div>
+      <div class="swipe-face"><div class="tl-row">${rail(dot(r.done ? 'done' : (isNext ? 'next' : ''), r.done ? '✓' : String(i + 1)))}<div class="tl-card">
       ${eta}
       <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}</div>
       ${editing ? stopEditForm(s) : `${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
       <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>`}
-      <div class="leg">🚗 ${fmtMin(l.dur)} · ${fmtKm(l.dist)} Anfahrt</div>
       ${noteHtml(s, 'route|' + i)}
       ${r.done ? '' : hoursHtml(s, r, res)}
       <div class="stopctl">
-        ${r.done ? `<button class="btn small secondary" data-act="undo">↶ Rückgängig</button>` : `<label class="onsite">Vor Ort <input type="number" min="0" max="600" inputmode="numeric" data-act="onsite" value="${onsiteOf(s)}"> Min.</label><button class="btn small donebtn" data-act="done">✓ Erledigt</button>`}
+        ${r.done ? `<button class="btn small secondary" data-act="undo">↶ Rückgängig</button>` : `<button class="btn small donebtn" data-act="done">✓ Erledigt</button>`}
       </div>
-      ${r.done ? '' : `<div class="navlbl">Navigation zu ${esc(label(s))}</div><div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`}
-    </div></li>`;
+      ${r.done ? '' : `<div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`}
+    </div></div></div></li>`);
   });
-  const lb = res.legs[res.stops.length] || { dur: 0, dist: 0 };
   const endPt = pts[pts.length - 1];
   const endTitle = hasExplicitDest(res) ? 'Ziel' : 'Zurück nach Hause';
-  rows.push(`<li class="stop rstop"><div class="badge" style="background:var(--green);color:#000">${hasExplicitDest(res) ? 'Z' : '⌂'}</div><div class="eta">${hasExplicitDest(res) ? 'Ziel ca.' : 'Zurück ca.'} <b>${hhmm(S.homeArr)}</b></div><div class="k">${endTitle}</div><div class="a">${esc(pointLabel(routeEnd(res)))}</div><div class="leg">🚗 ${fmtMin(lb.dur)} · ${fmtKm(lb.dist)}</div>
-    <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(endPt))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(endPt))}">Apple Karten</a></div></li>`);
+  rows.push(legRow(res.legs[res.stops.length]));
+  rows.push(`<li class="tl-node tl-end"><div class="tl-row">${rail(dot('home', hasExplicitDest(res) ? 'Z' : '⌂'))}<div class="tl-card">
+    <div class="tl-kicker">${hasExplicitDest(res) ? 'Ziel' : 'Zurück'}</div>
+    <div class="eta"><b>${hhmm(S.homeArr)}</b></div>
+    <div class="k">${endTitle}</div>
+    <div class="a">${esc(pointLabel(routeEnd(res)))}</div>
+    <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(endPt))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(endPt))}">Apple Karten</a></div>
+  </div></div></li>`);
   addStopBox();
   $('#routeList').innerHTML = rows.join('');
   if (mapFor !== res.id) { mapFor = res.id; renderMap(res); }
@@ -2451,13 +2467,6 @@ function bind() {
     if (!drafting()) saveResult();
     renderResult(); renderTours();
   });
-  $('#routeList').addEventListener('change', e => {
-    if (e.target.dataset.act !== 'onsite' || !state.result) return;
-    const s = state.result.stops[+e.target.closest('.rstop').dataset.i];
-    s.onsite = Math.max(0, Math.min(600, parseInt(e.target.value, 10) || 0));
-    if (!drafting()) saveResult();
-    renderResult();
-  });
   $('#tourCtl').addEventListener('change', e => {
     if (!state.result) return;
     if (e.target.id === 'tourDate') {
@@ -2519,7 +2528,7 @@ function bind() {
   $('#coordLinks').checked = !!settings.coordLinks;
   $('#googleKey').value = settings.googleKey || '';
   $('#toggleKey').addEventListener('click', () => { const i = $('#googleKey'); i.type = i.type === 'password' ? 'text' : 'password'; });
-  $('#defStart').value = settings.startTime || '05:30'; $('#defOnsite').value = settings.onsite ?? 5;
+  $('#defStart').value = settings.startTime || '05:30';
   renderDriverFields();
   $('#addDriver').addEventListener('click', () => { collectDriverFields(); settings.drivers.push({ name: '', address: '', lat: null, lon: null }); renderDriverFields(true); });
   $('#driverFields').addEventListener('click', e => {
@@ -2538,7 +2547,6 @@ function bind() {
     const newKey = $('#googleKey').value.trim();
     if (newKey !== (settings.googleKey || '')) { settings.googleKey = newKey; googleWarned = false; if (state.result) state.result.stops.forEach(x => { x.gTried = false; if (x.hours && x.hours.source !== 'google') x.hours = null; }); hoursCache = {}; LS.set('tp_hours', {}); }
     settings.startTime = $('#defStart').value || '05:30';
-    settings.onsite = Math.max(0, parseInt($('#defOnsite').value, 10) || 0);
     saveSettingsLS(); if (!getDriver() || !settings.drivers.some(d => d.name === state.driver)) state.driver = getDriver().name;
     saveState(); renderDriverFields(); renderDriver(); renderResult(); toast('Gespeichert');
     window.dispatchEvent(new Event('tp-settings-saved'));

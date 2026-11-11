@@ -78,13 +78,13 @@ textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--blue)}
 .navbtns .row{display:flex;gap:8px}
 .navbtns .row .btn{flex:1;font-size:15px}
 .navbtns .lbl{font-size:13px;color:var(--sub);margin-top:2px}
-.route .stop{cursor:default}
+.route .stop{cursor:default;padding:0;border-top:0}
 .route .swipe{position:relative;overflow:hidden;padding:0;touch-action:pan-y}
 .swipe-bg{position:absolute;inset:0;display:flex;justify-content:space-between;align-items:stretch;pointer-events:none}
 .swipe-hint{flex:1;display:flex;align-items:center;padding:0 16px;font-weight:800;font-size:16px;color:#fff}
 .swipe-hint.edit{justify-content:flex-start;background:#0a84ff}
 .swipe-hint.remove{justify-content:flex-end;background:var(--red)}
-.swipe-face{position:relative;z-index:1;background:var(--card);padding:12px 4px 12px 44px;transition:transform .18s ease}
+.swipe-face{position:relative;z-index:1;background:var(--card);padding:0;transition:transform .18s ease}
 .swipe-face.dragging{transition:none}
 .rstop.isnext .swipe-face{background:#10243a}
 .rstop.reveal-edit .swipe-hint.edit,.rstop.reveal-remove .swipe-hint.remove{font-size:17px}
@@ -133,13 +133,27 @@ html.sheet-open .bottom{visibility:hidden}
 .ordline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0 2px}
 .ordline .cat{color:var(--sub);font-size:14px}
 .rstop .badge{background:var(--blue);color:#fff}
-.rstop.isnext{background:rgba(10,132,255,.10);border-radius:12px;border-top-color:transparent;outline:2px solid var(--blue)}
-.rstop.isnext + .rstop{border-top-color:transparent}
-.rstop.isdone{opacity:.55}
-.rstop.isdone .badge{background:var(--green);color:#000}
-.eta{font-size:16px}
-.eta b{font-size:22px;font-variant-numeric:tabular-nums}
-.eta.done{color:var(--green);font-weight:600}
+.rstop.isnext .tl-card{outline:2px solid var(--blue)}
+.rstop.isdone .tl-card{opacity:.72}
+.eta{font-size:15px;color:var(--sub);margin:0 0 4px}
+.eta b{display:block;color:var(--text);font-size:28px;font-weight:700;letter-spacing:-.4px;font-variant-numeric:tabular-nums;line-height:1.1}
+.eta.done,.eta.done b{color:var(--green)}
+.timeline{margin-top:4px}
+.tl-row{display:flex;gap:10px;align-items:stretch}
+.rail{position:relative;width:22px;flex:none}
+.rail::before{content:"";position:absolute;left:9px;top:0;bottom:0;width:3px;background:#636366;border-radius:2px}
+.timeline > :first-child .rail::before{top:20px}
+.timeline > :last-child .rail::before{bottom:auto;height:20px}
+.dot{position:absolute;z-index:1;left:0;top:16px;width:22px;height:22px;border-radius:50%;background:#0a84ff;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;box-shadow:0 0 0 4px var(--card)}
+.dot.home,.dot.done{background:#30d158;color:#000}
+.dot.next{box-shadow:0 0 0 4px var(--card),0 0 0 6px #0a84ff}
+.tl-card{flex:1;min-width:0;background:#2c2c2e;border-radius:16px;padding:12px 14px;margin:4px 0}
+.tl-kicker{font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--sub)}
+.tl-leg .leg-meta{flex:1;display:flex;gap:8px;align-items:baseline;padding:7px 2px;color:var(--sub);font-size:15px;font-weight:600}
+.tl-leg .leg-meta b{color:var(--text);font-size:17px;font-variant-numeric:tabular-nums}
+.tl-card .navs{margin-top:10px}
+.tl-card .stopctl{margin-top:12px}
+.tl-card .donebtn{min-width:0;flex:none}
 .nexttag{background:var(--blue);color:#fff;font-size:11px;font-weight:700;padding:2px 6px;border-radius:6px;vertical-align:middle;text-transform:uppercase}
 .muted{color:var(--sub)}
 .small{font-size:13px;margin-top:4px}
@@ -154,9 +168,7 @@ html.sheet-open .bottom{visibility:hidden}
 .week td{padding:3px 0}
 .week td:first-child{color:var(--sub);width:70px}
 .week tr.cur td{color:var(--text);font-weight:700}
-.stopctl{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:10px}
-.onsite{font-size:14px;color:var(--sub);display:flex;align-items:center;gap:6px}
-.onsite input{width:64px;padding:6px 8px;font-size:16px;text-align:center}
+.stopctl{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:10px}
 .donebtn{background:var(--green);color:#000;min-width:120px}
 .navlbl{font-size:12px;color:var(--sub);margin-top:10px}
 .route .navs{margin-top:4px}
@@ -180,7 +192,6 @@ html.sheet-open .bottom{visibility:hidden}
 .nitem .a{color:var(--sub);font-size:13px}
 .nitem .ntext{white-space:pre-wrap;font-size:14px;color:#ffe680;margin-top:4px}
 .nitem textarea{margin:6px 0;font-size:16px}
-.onsite{white-space:nowrap}
 .printbtn{width:100%;margin:2px 0 10px;background:#fff;color:#000;font-size:17px;font-weight:600;padding:14px;border-radius:12px;min-height:50px}
 .printbtn:active,.firstbtn:active,.editbtn:active,.savebtn:active,.addstopbtn:active{background:#fff;opacity:.72}
 .firstbtn{width:100%;margin:8px 0 4px;background:#fff;color:#000;font-size:17px;font-weight:600;padding:14px;border-radius:12px;min-height:50px}

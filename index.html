@@ -67,8 +67,8 @@
     <div id="map"></div>
     <div class="navbtns" id="routeBtns"></div>
     <p class="note swipehint">Nach rechts wischen: bearbeiten. Nach links wischen: entfernen.</p>
-    <ul class="list route" id="routeList"></ul>
-    <p class="note">Ankunftszeiten sind Schätzungen ohne Verkehr (Fahrzeit + eingestellte Zeit vor Ort). Öffnungszeiten aus OpenStreetMap – können fehlen oder veraltet sein. Routing: OSRM.</p>
+    <ul class="list route timeline" id="routeList"></ul>
+    <p class="note">Ankunftszeiten sind Schätzungen ohne Verkehr, nur die Fahrzeit. Öffnungszeiten aus OpenStreetMap – können fehlen oder veraltet sein. Routing: OSRM.</p>
   </section>
 
   <section class="group">
@@ -96,10 +96,7 @@
     <div id="driverFields"></div>
     <button class="link" id="addDriver" style="margin-top:10px">+ Fahrer hinzufügen</button>
     <p class="note">Tipp: Wird eine Adresse nicht genau gefunden, Koordinaten eintragen (in Google Maps lange auf den Punkt drücken und Koordinaten kopieren). Fahrer und Adressen werden nur auf diesem Gerät gespeichert.</p>
-    <div class="two">
-      <label class="field">Standard-Abfahrt<input type="time" id="defStart"></label>
-      <label class="field">Minuten vor Ort je Stopp<input type="number" id="defOnsite" min="0" max="600" inputmode="numeric"></label>
-    </div>
+    <label class="field">Standard-Abfahrt<input type="time" id="defStart"></label>
     <label class="field">Google-Schlüssel (Places API, optional)
       <div class="keyrow"><input type="password" id="googleKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="nur auf diesem Gerät gespeichert"><button class="btn small secondary" type="button" id="toggleKey">👁</button></div>
     </label>
