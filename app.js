@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v27';
+const VERSION = 'tp-v28';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2722,6 +2722,9 @@ function lockPageZoom() {
 let barGapPx = -1, barHeightPx = -1;
 function syncBarSpace() {
   const vv = window.visualViewport;
+  const scale = vv && vv.scale ? vv.scale : 1;
+  const viewW = Math.round(scale < 1 && vv ? vv.width * scale : ((vv && vv.width) || window.innerWidth));
+  if (viewW > 200) document.documentElement.style.setProperty('--app-w', viewW + 'px');
   const gap = vv ? Math.max(0, Math.round(window.innerHeight - vv.offsetTop - vv.height)) : 0;
   if (gap !== barGapPx) {
     barGapPx = gap;
