@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v26';
+const VERSION = 'tp-v27';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2188,12 +2188,17 @@ function renderResultInner() {
   if (ends) ends.innerHTML = endpointBlock('start', res) + endpointBlock('dest', res) + '<p class="note endpoints-note">Nur diese Route. Die Fahrer-Adressen in den Einstellungen bleiben unverändert.</p>';
   firstStopBox(res);
   const g = chunk(pts, 9), a = chunk(pts, 13);
-  let html = '';
-  html += `<div class="row">${g.map((p, i) => `<a class="btn gmaps" target="_blank" rel="noopener" href="${esc(googleUrl(p))}">Google Maps${g.length > 1 ? ` ${i + 1}/${g.length}` : ''}</a>`).join('')}</div>`;
-  if (g.length > 1) html += `<div class="lbl">Google erlaubt max. 9 Zwischenziele pro Link – Teil 2 startet bei ${esc(g.slice(1).map(p => shortName(p[0], res)).join(', '))}.</div>`;
-  html += `<div class="row">${a.map((p, i) => `<a class="btn amaps" target="_blank" rel="noopener" href="${esc(appleUrl(p))}">Apple Karten${a.length > 1 ? ` ${i + 1}/${a.length}` : ''}</a>`).join('')}</div>`;
-  html += '<div class="lbl">Apple-Gesamtroute benötigt iOS 18.4 oder neuer. Sonst die Einzel-Links je Stopp verwenden.</div>';
-  $('#routeBtns').innerHTML = html;
+  const linkBlock = (title, parts, cls, hint) => {
+    const n = parts.length;
+    const buttons = parts.map((p, i) => {
+      const href = cls === 'gmaps' ? googleUrl(p) : appleUrl(p);
+      const label = n > 1 ? `Teil ${i + 1} von ${n}` : 'Gesamtroute';
+      return `<a class="btn ${cls}" target="_blank" rel="noopener" href="${esc(href)}">${label}</a>`;
+    }).join('');
+    return `<div class="routelinks"><div class="routelinks-h">${title}</div><div class="routelinks-grid">${buttons}</div>${hint ? `<div class="lbl">${hint}</div>` : ''}</div>`;
+  };
+  const gHint = g.length > 1 ? `Google erlaubt max. 9 Zwischenziele pro Link. Teil 2 startet bei ${esc(g.slice(1).map(p => shortName(p[0], res)).join(', '))}.` : '';
+  $('#routeBtns').innerHTML = linkBlock('Google Maps', g, 'gmaps', gHint) + linkBlock('Apple Karten', a, 'amaps', 'Apple-Gesamtroute benötigt iOS 18.4 oder neuer. Sonst die Einzel-Links je Stopp verwenden.');
   const rail = dot => `<div class="rail">${dot || ''}</div>`;
   const dot = (cls, text) => `<span class="dot ${cls}">${text}</span>`;
   const legRow = leg => {
