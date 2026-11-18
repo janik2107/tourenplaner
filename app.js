@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v28';
+const VERSION = 'tp-v29';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -495,6 +495,75 @@ function solveTour(D, first) {
   return order;
 }
 
+function preferredArea() {
+  const a = settings.preferredArea;
+  if (!Array.isArray(a)) return [];
+  return a.map(p => ({ lat: +p.lat, lon: +p.lon })).filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+}
+function pointInArea(lat, lon, area) {
+  const poly = area || preferredArea();
+  if (!poly || poly.length < 3 || !Number.isFinite(+lat) || !Number.isFinite(+lon)) return false;
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const yi = poly[i].lat, xi = poly[i].lon, yj = poly[j].lat, xj = poly[j].lon;
+    const dy = yj - yi;
+    const hit = (yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (dy || 1e-12) + xi;
+    if (hit) inside = !inside;
+  }
+  return inside;
+}
+function solveOpenPath(D, start, nodes) {
+  if (!nodes.length) return [];
+  const m = nodes.length + 1;
+  const M = Array.from({ length: m }, () => Array(m).fill(0));
+  for (let a = 0; a < nodes.length; a++) {
+    M[0][a + 1] = D[start][nodes[a]] || 0;
+    for (let b = 0; b < nodes.length; b++) M[a + 1][b + 1] = D[nodes[a]][nodes[b]] || 0;
+  }
+  return solveTour(M, -1).map(i => nodes[i - 1]);
+}
+function solveAnchored(D, anchor, nodes) {
+  if (!nodes.length) return [];
+  if (anchor === 0) {
+    const idx = [0, ...nodes];
+    const M = idx.map(a => idx.map(b => D[a][b] || 0));
+    return solveTour(M, -1).map(i => idx[i]);
+  }
+  const idx = [0, ...nodes, anchor];
+  const M = idx.map(a => idx.map(b => D[a][b] || 0));
+  const anchorLocal = idx.length - 1;
+  const order = solveTour(M, anchorLocal);
+  if (!order.length || order[0] !== anchorLocal) return nodes.slice();
+  return order.slice(1).map(i => idx[i]);
+}
+function orderLooksValid(order, n) {
+  if (!order || order.length !== n - 1) return false;
+  const seen = new Set(order);
+  if (seen.size !== order.length) return false;
+  for (const i of order) if (!(i >= 1 && i < n)) return false;
+  return true;
+}
+// first bleibt vorn. Danach zuerst Knoten im Gebiet, dann der Rest. Ohne Gebiet wie solveTour.
+function orderWithArea(D, first, insideAt) {
+  const n = D.length;
+  const areaOn = preferredArea().length >= 3 && typeof insideAt === 'function';
+  const inside = [];
+  if (areaOn) for (let i = 1; i < n; i++) if (i !== first && insideAt(i)) inside.push(i);
+  if (!inside.length) return solveTour(D, first);
+  const outside = [];
+  for (let i = 1; i < n; i++) if (i !== first && !insideAt(i)) outside.push(i);
+  const prefix = first > 0 ? [first] : [];
+  const anchor = first > 0 ? first : 0;
+  let order;
+  if (!outside.length) order = prefix.concat(solveAnchored(D, anchor, inside));
+  else {
+    const insideOrder = solveOpenPath(D, anchor, inside);
+    const from = insideOrder.length ? insideOrder[insideOrder.length - 1] : anchor;
+    order = prefix.concat(insideOrder, solveAnchored(D, from, outside));
+  }
+  return orderLooksValid(order, n) ? order : solveTour(D, first);
+}
+
 /* ---------------- Planen ---------------- */
 let planning = false;
 async function plan() {
@@ -524,7 +593,7 @@ async function plan() {
     const pts = [home, ...stops.map(s => s.geo)];
     const T = await osrmTable(pts);
     const firstIdx = state.firstId ? stops.findIndex(s => s.id === state.firstId) + 1 : -1;
-    const order = solveTour(T.dur, firstIdx);
+    const order = orderWithArea(T.dur, firstIdx, i => pointInArea(pts[i].lat, pts[i].lon));
     const seqPts = [home, ...order.map(i => pts[i]), home];
     let legs, geometry = null;
     try { const r = await osrmRoute(seqPts); legs = r.legs; geometry = r.geometry; }
@@ -1776,7 +1845,7 @@ async function makeFirstStop(index) {
     const endPt = { lat: +goal.lat, lon: +goal.lon };
     const matrixPts = [endPt, ...res.stops.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon }))];
     const T = await osrmTable(matrixPts);
-    const order = solveTour(T.dur, index + 1);
+    const order = orderWithArea(T.dur, index + 1, i => pointInArea(matrixPts[i].lat, matrixPts[i].lon));
     if (!order.length || order[0] !== index + 1) throw new Error('Reihenfolge konnte nicht berechnet werden.');
     const ordered = order.map(i => res.stops[i - 1]);
     if (ordered.length !== res.stops.length || ordered.some(s => !s)) throw new Error('Reihenfolge konnte nicht berechnet werden.');
@@ -1827,16 +1896,27 @@ async function planOpenTail(res, extras) {
       ? { lat: +done[done.length - 1].geo.lat, lon: +done[done.length - 1].geo.lon }
       : { lat: +home.lat, lon: +home.lon };
     const anchorIsEnd = !done.length && Math.abs(anchor.lat - endPt.lat) < 1e-5 && Math.abs(anchor.lon - endPt.lon) < 1e-5;
+    const areaOn = preferredArea().length >= 3 && open.some(s => pointInArea(s.geo.lat, s.geo.lon));
     if (anchorIsEnd) {
       const pts = [endPt, ...open.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon }))];
       const T = await osrmTable(pts);
-      const order = solveTour(T.dur, -1);
+      const order = areaOn ? orderWithArea(T.dur, 1, i => pointInArea(pts[i].lat, pts[i].lon)) : solveTour(T.dur, -1);
       orderedOpen = order.map(i => open[i - 1]);
     } else {
       const pts = [endPt, ...open.map(s => ({ lat: +s.geo.lat, lon: +s.geo.lon })), anchor];
       const anchorIdx = pts.length - 1;
       const T = await osrmTable(pts);
-      const order = solveTour(T.dur, anchorIdx);
+      let order;
+      if (!areaOn) order = solveTour(T.dur, anchorIdx);
+      else {
+        const insideAt = i => i !== anchorIdx && pointInArea(pts[i].lat, pts[i].lon);
+        const openIdx = open.map((_, i) => i + 1);
+        const inside = openIdx.filter(insideAt);
+        const outside = openIdx.filter(i => !insideAt(i));
+        const insideOrder = solveOpenPath(T.dur, anchorIdx, inside);
+        const from = insideOrder.length ? insideOrder[insideOrder.length - 1] : anchorIdx;
+        order = [anchorIdx, ...insideOrder, ...solveAnchored(T.dur, from, outside)];
+      }
       if (!order.length || order[0] !== anchorIdx) throw new Error('Reihenfolge konnte nicht berechnet werden.');
       orderedOpen = order.slice(1).map(i => open[i - 1]);
     }
@@ -2221,7 +2301,7 @@ function renderResultInner() {
       <div class="swipe-bg" aria-hidden="true"><span class="swipe-hint edit">Bearbeiten</span><span class="swipe-hint remove">Entfernen</span></div>
       <div class="swipe-face"><div class="tl-row">${rail(dot(r.done ? 'done' : (isNext ? 'next' : ''), r.done ? '✓' : String(i + 1)))}<div class="tl-card">
       ${eta}
-      <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}</div>
+      <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}${s.geo && pointInArea(s.geo.lat, s.geo.lon) ? '<span class="tag gebiet">Gebiet</span>' : ''}</div>
       ${editing ? stopEditForm(s) : `${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
       <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>`}
       ${noteHtml(s, 'route|' + i)}
@@ -2268,7 +2348,105 @@ function renderMap(res) {
   L.marker(ll[0], { icon: L.divIcon({ className: 'num-marker home', html: separateEnd ? 'S' : '⌂' }) }).addTo(mapLayer);
   res.stops.forEach((s, i) => L.marker(ll[i + 1], { icon: L.divIcon({ className: 'num-marker', html: String(i + 1) }) }).bindPopup(esc(label(s))).addTo(mapLayer));
   if (separateEnd) L.marker(ll[ll.length - 1], { icon: L.divIcon({ className: 'num-marker home', html: 'Z' }) }).addTo(mapLayer);
-  setTimeout(() => { map.invalidateSize(); map.fitBounds(L.latLngBounds(ll), { padding: [24, 24] }); }, 50);
+  const area = preferredArea();
+  if (area.length >= 3) {
+    const ring = area.map(p => [p.lat, p.lon]);
+    L.polygon(ring, { color: '#64d2ff', weight: 2, fillColor: '#0a84ff', fillOpacity: 0.28 }).addTo(mapLayer);
+    ring.forEach(p => ll.push(p));
+  }
+  if (!map._areaHook) {
+    map._areaHook = true;
+    map.on('click', e => {
+      if (!areaDrawing || !e.latlng) return;
+      areaDraftPts.push({ lat: e.latlng.lat, lon: e.latlng.lng });
+      refreshDrawLayer();
+    });
+    map.getContainer().addEventListener('touchmove', e => { if (areaDrawing && e.cancelable) e.preventDefault(); }, { passive: false });
+  }
+  setTimeout(() => {
+    map.invalidateSize();
+    if (!areaDrawing) map.fitBounds(L.latLngBounds(ll), { padding: [24, 24] });
+  }, 50);
+  updateAreaButtons();
+}
+let areaDrawing = false;
+let areaDraftPts = [];
+let drawLayer = null;
+function updateAreaButtons() {
+  const draw = $('#areaDraw'), done = $('#areaDone'), cancel = $('#areaCancel'), clear = $('#areaClear'), hint = $('#areaHint');
+  if (!draw) return;
+  const has = preferredArea().length >= 3;
+  draw.hidden = areaDrawing;
+  if (done) done.hidden = !areaDrawing;
+  if (cancel) cancel.hidden = !areaDrawing;
+  if (clear) clear.hidden = areaDrawing || !has;
+  if (hint) hint.hidden = !areaDrawing;
+}
+function setMapDrawing(on) {
+  const el = $('#map');
+  if (el) el.classList.toggle('drawing', on);
+  if (!map) return;
+  const fn = on ? 'disable' : 'enable';
+  ['dragging', 'touchZoom', 'doubleClickZoom', 'scrollWheelZoom', 'boxZoom'].forEach(k => { if (map[k] && map[k][fn]) map[k][fn](); });
+}
+function refreshDrawLayer() {
+  if (!map || typeof L === 'undefined') return;
+  if (drawLayer) { drawLayer.remove(); drawLayer = null; }
+  if (!areaDraftPts.length) return;
+  drawLayer = L.layerGroup().addTo(map);
+  const latlngs = areaDraftPts.map(p => [p.lat, p.lon]);
+  if (latlngs.length >= 2) L.polyline(latlngs, { color: '#0a84ff', weight: 3 }).addTo(drawLayer);
+  areaDraftPts.forEach(p => L.circleMarker([p.lat, p.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#0a84ff', fillOpacity: 1 }).addTo(drawLayer));
+}
+function stopAreaDraw() {
+  areaDrawing = false;
+  areaDraftPts = [];
+  setMapDrawing(false);
+  if (drawLayer) { drawLayer.remove(); drawLayer = null; }
+  updateAreaButtons();
+}
+async function applyAreaToOpenTour() {
+  const res = state.result;
+  if (!res || !res.stops || !res.stops.length) return;
+  if (res.stops.some(s => !s.geo || !hasPos(s.geo))) return;
+  const prev = res.stops.slice();
+  try {
+    await planOpenTail(res, []);
+    mapFor = null;
+    renderResult();
+    renderTours();
+  } catch (e) {
+    res.stops = prev;
+    renderResult();
+    toast(e.message || 'Reihenfolge konnte nicht neu berechnet werden.', 5000);
+  }
+}
+function beginAreaDraw() {
+  if (!map || $('#map').hidden) { toast('Die Karte ist noch nicht bereit.'); return; }
+  areaDrawing = true;
+  areaDraftPts = [];
+  if (drawLayer) { drawLayer.remove(); drawLayer = null; }
+  setMapDrawing(true);
+  updateAreaButtons();
+}
+async function finishAreaDraw() {
+  if (areaDraftPts.length < 3) { toast('Bitte mindestens 3 Punkte antippen.'); return; }
+  settings.preferredArea = areaDraftPts.map(p => ({ lat: +p.lat.toFixed(6), lon: +p.lon.toFixed(6) }));
+  saveSettingsLS();
+  stopAreaDraw();
+  mapFor = null;
+  if (state.result) renderMap(state.result);
+  toast('Gebiet gespeichert');
+  await applyAreaToOpenTour();
+}
+function clearArea() {
+  settings.preferredArea = [];
+  saveSettingsLS();
+  stopAreaDraw();
+  mapFor = null;
+  if (state.result) renderMap(state.result);
+  toast('Gebiet gelöscht');
+  applyAreaToOpenTour();
 }
 function datumKey(t) {
   const m = String(t && t.datum || '').match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -2412,6 +2590,15 @@ function bind() {
     saveState(); renderStops(); renderResult();
   });
   $('#planBtn').addEventListener('click', plan);
+  const areaDrawBtn = $('#areaDraw');
+  if (areaDrawBtn) areaDrawBtn.addEventListener('click', beginAreaDraw);
+  const areaDoneBtn = $('#areaDone');
+  if (areaDoneBtn) areaDoneBtn.addEventListener('click', finishAreaDraw);
+  const areaCancelBtn = $('#areaCancel');
+  if (areaCancelBtn) areaCancelBtn.addEventListener('click', () => { stopAreaDraw(); if (state.result) renderMap(state.result); });
+  const areaClearBtn = $('#areaClear');
+  if (areaClearBtn) areaClearBtn.addEventListener('click', clearArea);
+  updateAreaButtons();
   $('#printRoute').addEventListener('click', () => {
     printRoute().catch(e => { if (e && e.name === 'AbortError') return; console.error(e); toast('Drucken fehlgeschlagen'); });
   });
@@ -2784,6 +2971,6 @@ pinBottomBar();
   else if (!getDriver()) openSettings();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
   // für Tests
-  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, chunk, googleUrl, appleUrl, state: () => state, tours: () => tours, handleFiles, plan, routeSheet, buildRoutePdf, printRoute, routeStart, routeEnd, render: () => render() };
+  window.TP = { VERSION, notes: () => notes, findNote, dealerKey, computeSchedule, nameScore, fetchHoursForResult, parseOrders, solveTour, orderWithArea, pointInArea, chunk, googleUrl, appleUrl, state: () => state, tours: () => tours, settings: () => settings, handleFiles, plan, routeSheet, buildRoutePdf, printRoute, routeStart, routeEnd, render: () => render() };
   window.addEventListener('hashchange', () => { if (/[#&](setup|tour)=/.test(location.hash)) location.reload(); });
 })();

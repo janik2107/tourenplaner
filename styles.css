@@ -79,7 +79,13 @@ textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px var(--blue)}
 .totals div{background:var(--card2);border-radius:10px;padding:10px;text-align:center}
 .totals b{display:block;font-size:20px}
 .totals span{color:var(--sub);font-size:12px}
-#map{height:260px;border-radius:12px;overflow:hidden;margin-bottom:12px;background:#111}
+#map{height:260px;border-radius:12px;overflow:hidden;margin-bottom:8px;background:#111}
+#map.drawing{touch-action:none}
+.area-tools{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;min-width:0;max-width:100%}
+.area-tools .row{display:flex;gap:8px;min-width:0}
+.area-tools .row .btn{flex:1;min-width:0;min-height:48px}
+.area-tools > .btn{width:100%;min-height:48px}
+.tag.gebiet{background:rgba(10,132,255,.2);color:#64d2ff}
 .leaflet-container{background:#111}
 .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.95) contrast(.9) saturate(.6)}
 .num-marker{background:var(--blue);color:#fff;border:2px solid #fff;border-radius:50%;width:26px!important;height:26px!important;display:flex;align-items:center;justify-content:center;font:700 12px/1 -apple-system,sans-serif;margin:-13px 0 0 -13px!important}
