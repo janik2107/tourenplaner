@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v29';
+const VERSION = 'tp-v30';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -87,11 +87,43 @@ function doneStamp(v) {
   const n = +v;
   return Number.isFinite(n) && n > 0 ? n : null;
 }
+function isVehicleAuftrag(s) {
+  if (!s) return false;
+  const kat = String(s.kategorie || '').trim();
+  const auf = String(s.auftrag || '').trim();
+  return /fahrzeug/i.test(kat) && /^\d{1,4}$/.test(auf);
+}
+function vehicleCount(s) {
+  if (!s) return null;
+  if (s.fahrzeuge != null && s.fahrzeuge !== '' && Number.isFinite(+s.fahrzeuge) && +s.fahrzeuge >= 0) return Math.min(999, Math.round(+s.fahrzeuge));
+  if (isVehicleAuftrag(s)) return +String(s.auftrag).trim();
+  return null;
+}
+function orderNo(s) {
+  if (!s) return '';
+  const auf = String(s.auftrag || '').trim();
+  if (!auf || isVehicleAuftrag(s)) return '';
+  return auf;
+}
+function setVehicles(s, raw) {
+  const n = parseInt(String(raw == null ? '' : raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 0 || n > 999) return false;
+  s.fahrzeuge = n;
+  return true;
+}
+function setOrderNo(s, raw) {
+  const next = String(raw == null ? '' : raw).trim();
+  if (isVehicleAuftrag(s) && (s.fahrzeuge == null || s.fahrzeuge === '')) {
+    const n = vehicleCount(s);
+    if (n != null) s.fahrzeuge = n;
+  }
+  s.auftrag = next;
+}
 function rememberDoneStop(s) {
   const ts = doneStamp(s && s.done);
   if (!ts) return false;
   let changed = false;
-  const auf = String(s.auftrag || '').trim();
+  const auf = orderNo(s);
   if (auf) {
     const prev = doneStamp(doneMemory.byAuftrag[auf]);
     if (!prev || ts < prev) { doneMemory.byAuftrag[auf] = ts; changed = true; }
@@ -106,7 +138,7 @@ function rememberDoneStop(s) {
 function memoryTime(s) {
   if (!s) return null;
   const times = [];
-  const auf = String(s.auftrag || '').trim();
+  const auf = orderNo(s);
   if (auf) { const t = doneStamp(doneMemory.byAuftrag[auf]); if (t) times.push(t); }
   const id = s.id != null ? String(s.id).trim() : '';
   if (id) { const t = doneStamp(doneMemory.byId[id]); if (t) times.push(t); }
@@ -140,7 +172,7 @@ function seedDoneMemoryFromStored() {
 }
 function forgetDoneStop(s) {
   if (!s) return;
-  const auf = String(s.auftrag || '').trim();
+  const auf = orderNo(s);
   if (auf) delete doneMemory.byAuftrag[auf];
   const id = s.id != null ? String(s.id).trim() : '';
   if (id) delete doneMemory.byId[id];
@@ -154,7 +186,7 @@ function drafting() { return !!(draftId && state.result && String(state.result.i
 function draftKey(s) {
   if (!s) return '';
   const id = s.id != null ? String(s.id).trim() : '';
-  return id || String(s.auftrag || '').trim();
+  return id || orderNo(s);
 }
 const saveState = () => LS.set('tp_state', { driver: state.driver, stops: state.stops, firstId: state.firstId, result: drafting() ? draftSnapshot : state.result });
 function todayDatum() {
@@ -598,7 +630,7 @@ async function plan() {
     let legs, geometry = null;
     try { const r = await osrmRoute(seqPts); legs = r.legs; geometry = r.geometry; }
     catch { legs = []; let p = 0; for (const i of [...order, 0]) { legs.push({ dur: T.dur[p][i], dist: T.dist[p][i] }); p = i; } }
-    const ordered = order.map(i => { const s = stops[i - 1]; return { id: s.id, auftrag: s.auftrag, kategorie: s.kategorie, datum: s.datum, kunde: s.kunde, plz: s.plz, ort: s.ort, strasse: s.strasse, typ: s.typ, betrag: s.betrag, geo: s.geo }; });
+    const ordered = order.map(i => { const s = stops[i - 1]; const o = { id: s.id, auftrag: s.auftrag, kategorie: s.kategorie, datum: s.datum, kunde: s.kunde, plz: s.plz, ort: s.ort, strasse: s.strasse, typ: s.typ, betrag: s.betrag, geo: s.geo }; if (s.fahrzeuge != null && s.fahrzeuge !== '' && Number.isFinite(+s.fahrzeuge)) o.fahrzeuge = Math.round(+s.fahrzeuge); return o; });
     const datum = (stops.find(s => s.datum) || {}).datum || new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const result = {
       id: uid(), created: Date.now(), driver: drv.name, driverName: drv.name, datum,
@@ -860,7 +892,11 @@ function renderStops() {
     if (s.geoErr) tags.push(`<span class="tag err">${esc(s.geoErr)}</span>`);
     else if (s.geo?.approx) tags.push('<span class="tag warn">nur PLZ/Ort gefunden</span>');
     else if (s.geo) tags.push('<span class="tag">📍 gefunden</span>');
-    const head = s.auftrag ? `${esc(s.auftrag)} <span class="cat">| ${esc(s.kategorie)} | ${esc(s.datum)}</span>` : '<span class="cat">Manuelle Adresse</span>';
+    const veh = vehicleCount(s);
+    const nr = orderNo(s);
+    const head = veh != null
+      ? `${veh} Fahrzeuge${nr ? ' · ' + esc(nr) : ''}${s.datum ? ` <span class="cat">| ${esc(s.datum)}</span>` : ''}`
+      : (s.auftrag ? `${esc(s.auftrag)} <span class="cat">| ${esc(s.kategorie)} | ${esc(s.datum)}</span>` : '<span class="cat">Manuelle Adresse</span>');
     return `<li class="stop${first ? ' first' : ''}" data-id="${s.id}">
       <div class="badge">${first ? '1' : i + 1}</div>
       <div class="h">${head}</div>
@@ -882,7 +918,7 @@ function renderStops() {
   }).join('');
 }
 let map = null, mapLayer = null, mapFor = null;
-const label = s => [s.auftrag, s.kunde].filter(Boolean).join(' · ') || addrText(s);
+const label = s => [orderNo(s), s.kunde].filter(Boolean).join(' · ') || addrText(s);
 const hhmm = d => d ? d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '–';
 const WD = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 function tourDate(res) {
@@ -1254,14 +1290,19 @@ function routeSheet(res) {
   res.stops.forEach((s, i) => {
     const r = S.rows[i] || {};
     const leg = (res.legs && res.legs[i]) || { dur: 0, dist: 0 };
-    const ord = [s.auftrag || 'ohne Nr.'];
-    if (s.kategorie) ord.push(s.kategorie);
+    const ord = [];
+    const vehN = vehicleCount(s);
+    if (vehN != null) ord.push(vehN + ' Fahrzeuge');
+    if (orderNo(s)) ord.push(orderNo(s));
+    else if (!vehN && s.auftrag) ord.push(s.auftrag);
+    if (s.kategorie && !/fahrzeug/i.test(s.kategorie)) ord.push(s.kategorie);
     if (s.typ && /termin/i.test(s.typ)) ord.push(s.typ);
     const lines = [];
     if (r.done) lines.push({ k: 'time', t: 'Erledigt um ' + hhmm(r.dep) });
     else lines.push({ k: 'time', t: (i === S.next ? 'Als Nächstes · ' : '') + 'Ankunft ca. ' + hhmm(r.arr) });
     lines.push({ k: 'ord', t: ord.join(' · ') });
-    if (s.kunde) lines.push({ k: 'name', t: s.kunde });
+    const place = [s.kunde, orderNo(s)].filter(Boolean).join(' · ');
+    if (place) lines.push({ k: 'name', t: place });
     lines.push({ k: 'addr', t: addrText(s) || 'keine Adresse' });
     lines.push({ k: 'muted', t: 'Anfahrt ' + fmtMin(leg.dur) + ' · ' + fmtKm(leg.dist) });
     const note = visibleNote(s, i);
@@ -1513,7 +1554,7 @@ function copyHoursOnto(fromStops, toStops) {
 function sameStop(a, b) {
   if (!a || !b) return false;
   if (a.id != null && b.id != null && String(a.id) === String(b.id)) return true;
-  const aa = String(a.auftrag || '').trim(), bb = String(b.auftrag || '').trim();
+  const aa = orderNo(a), bb = orderNo(b);
   return !!(aa && aa === bb);
 }
 function doneElsewhere(s, exceptId) {
@@ -1717,7 +1758,11 @@ async function saveRouteStop(li) {
     }
     const keptDone = doneStamp(s.done);
     s.kunde = next.kunde; s.strasse = next.strasse; s.plz = next.plz; s.ort = next.ort;
-    s.auftrag = next.auftrag; s.kategorie = next.kategorie;
+    if (next.fahrzeuge != null && String(next.fahrzeuge).trim() !== '') {
+      if (!setVehicles(s, next.fahrzeuge)) throw Object.assign(new Error('Bitte eine Zahl für die Fahrzeuge eingeben.'), { user: true });
+    }
+    if (!(isVehicleAuftrag(before) && !String(next.auftrag || '').trim())) setOrderNo(s, next.auftrag);
+    s.kategorie = next.kategorie;
     if (keptDone) s.done = keptDone;
     applyRememberedDone([s]);
     if (placeChanged) { s.geo = geo; s.hours = null; s.gTried = false; delete s.gNoHours; }
@@ -1737,6 +1782,7 @@ async function saveRouteStop(li) {
 }
 
 let routeEdit = null;      // 'start' | 'dest' | 'stop|<i>' – nur die Ansicht, wird nicht gespeichert
+let quickEdit = null;      // 'veh|<i>' | 'auf|<i>' – kleine Bearbeitung, bei Entwurf erst nach Speichern
 let pickFirst = false;
 let addStopOpen = false;
 let routeEditTour = null;
@@ -1784,7 +1830,8 @@ function stopEditForm(s) {
     <input class="full" name="strasse" placeholder="Straße und Hausnr." value="${esc(s.strasse)}">
     <input name="plz" placeholder="PLZ" inputmode="numeric" value="${esc(s.plz)}">
     <input name="ort" placeholder="Ort" value="${esc(s.ort)}">
-    <input name="auftrag" placeholder="Auftrag" value="${esc(s.auftrag)}">
+    <input name="fahrzeuge" inputmode="numeric" placeholder="Fahrzeuge" value="${vehicleCount(s) != null ? vehicleCount(s) : ''}">
+    <input name="auftrag" placeholder="Auftragsnummer" value="${esc(orderNo(s))}">
     <input name="kategorie" placeholder="Kategorie" value="${esc(s.kategorie)}">
     <input class="full" name="coords" inputmode="decimal" placeholder="Koordinaten optional, z. B. 51.0504, 13.7373" value="">
     <div class="row"><button type="button" class="btn small secondary" data-act="canceledit">Abbrechen</button><button type="button" class="btn small" data-act="savestop">Übernehmen</button></div>
@@ -2246,7 +2293,7 @@ function renderResult() { keepNoteEditing(() => keepRouteEditing(renderResultInn
 function renderResultInner() {
   const res = state.result, sec = $('#resultSection');
   if (!res) { routeEdit = null; routeEditTour = null; sec.hidden = true; mapFor = null; const host = $('#firstStop'); if (host) host.innerHTML = ''; const saveHost = $('#routeSave'); if (saveHost) saveHost.innerHTML = ''; addStopOpen = false; addStopBox(); return; }
-  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; pickFirst = false; addStopOpen = false; }
+  if (routeEditTour !== res.id) { routeEdit = null; routeEditTour = res.id; pickFirst = false; addStopOpen = false; quickEdit = null; }
   if (applyRememberedDone(res.stops)) saveResult(res);
   sec.hidden = false;
   const S = computeSchedule(res);
@@ -2259,7 +2306,9 @@ function renderResultInner() {
   // Nächster Stopp
   if (S.next >= 0) {
     const s = res.stops[S.next], r = S.rows[S.next], p = pts[S.next + 1];
-    $('#nextBox').innerHTML = `<div class="nb-l">Nächster Stopp</div><div class="nb-t"><span class="ordno">${esc(s.auftrag || '–')}</span> ${esc(s.kunde || addrText(s))}</div>
+    const nextVeh = vehicleCount(s);
+    const nextNo = orderNo(s);
+    $('#nextBox').innerHTML = `<div class="nb-l">Nächster Stopp</div><div class="nb-t">${nextVeh != null ? `<span class="ordno">${nextVeh} Fahrzeuge</span> ` : ''}${esc(s.kunde || addrText(s))}${nextNo ? ` <span class="aufnr">${esc(nextNo)}</span>` : ''}</div>
       <div class="nb-eta">Ankunft ca. <b>${hhmm(r.arr)}</b></div>
       <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`;
     $('#nextBox').hidden = false;
@@ -2301,8 +2350,8 @@ function renderResultInner() {
       <div class="swipe-bg" aria-hidden="true"><span class="swipe-hint edit">Bearbeiten</span><span class="swipe-hint remove">Entfernen</span></div>
       <div class="swipe-face"><div class="tl-row">${rail(dot(r.done ? 'done' : (isNext ? 'next' : ''), r.done ? '✓' : String(i + 1)))}<div class="tl-card">
       ${eta}
-      <div class="ordline"><span class="ordno">${esc(s.auftrag || 'ohne Nr.')}</span>${s.kategorie ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}${s.geo && pointInArea(s.geo.lat, s.geo.lon) ? '<span class="tag gebiet">Gebiet</span>' : ''}</div>
-      ${editing ? stopEditForm(s) : `${s.kunde ? `<div class="k">${esc(s.kunde)}</div>` : ''}
+      <div class="ordline">${quickEdit === 'veh|' + i ? '' : (vehicleCount(s) != null ? `<button type="button" class="ordno veh" data-act="editveh">${vehicleCount(s)} Fahrzeuge</button>` : '')}${s.kategorie && !/fahrzeug/i.test(s.kategorie) ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}${s.geo && pointInArea(s.geo.lat, s.geo.lon) ? '<span class="tag gebiet">Gebiet</span>' : ''}</div>
+      ${editing ? stopEditForm(s) : `${quickEdit === 'veh|' + i ? `<div class="mini-edit"><input id="quickVeh" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="done" value="${vehicleCount(s) != null ? vehicleCount(s) : ''}"><button type="button" class="btn small" data-act="saveveh">Übernehmen</button><button type="button" class="btn small secondary" data-act="cancelmini">Abbrechen</button></div>` : ''}${quickEdit === 'auf|' + i ? `<div class="mini-edit"><input id="quickAuf" autocomplete="off" enterkeyhint="done" placeholder="Auftragsnummer" value="${esc(orderNo(s))}"><button type="button" class="btn small" data-act="saveauf">Übernehmen</button><button type="button" class="btn small secondary" data-act="cancelmini">Abbrechen</button></div>` : `<div class="place-line">${s.kunde || s.ort ? `<span class="k">${esc(s.kunde || s.ort)}</span>` : ''}${(s.kunde || s.ort) && orderNo(s) ? '<span class="aufnr">·</span>' : ''}${orderNo(s) ? `<button type="button" class="aufnr" data-act="editauf">${esc(orderNo(s))}</button>` : `<button type="button" class="aufnr empty" data-act="editauf">Nr.</button>`}</div>`}
       <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>`}
       ${noteHtml(s, 'route|' + i)}
       ${r.done ? '' : hoursHtml(s, r, res)}
@@ -2465,7 +2514,7 @@ function renderTours() {
     const title = t.name ? (t.datum ? `${esc(t.name)} · ${esc(t.datum)}` : esc(t.name)) : `${esc(t.driverName)} · ${esc(t.datum)}`;
     return `<li class="tour" data-tid="${t.id}">
     <div><div class="t">${title}</div><div class="s">${t.stops.length} Stopps${dn ? ` (${dn} erledigt)` : ''} · ${fmtKm(t.totalDist)} · ${fmtMin(t.totalDur)}</div>
-    <div class="s ords">Aufträge: ${t.stops.map(s => esc(s.auftrag || '–')).join(', ')}</div></div>
+    <div class="s ords">Aufträge: ${t.stops.map(s => esc(orderNo(s) || (vehicleCount(s) != null ? vehicleCount(s) + ' Fahrzeuge' : '–'))).join(', ')}</div></div>
     <div style="display:flex;gap:6px"><button class="btn small secondary" data-act="open">Öffnen</button><button class="icon del" data-act="deltour" aria-label="Löschen">✕</button></div></li>`; }).join('');
 }
 
@@ -2640,7 +2689,29 @@ function bind() {
     const act = b.dataset.act;
     if (act === 'canceledit') { routeEdit = null; renderResult(); return; }
     if (act === 'savestop') { saveRouteStop(li); return; }
+    if (act === 'editveh' || act === 'editauf') {
+      quickEdit = (act === 'editveh' ? 'veh|' : 'auf|') + li.dataset.i;
+      renderResult();
+      const inp = $('#quickVeh') || $('#quickAuf');
+      if (inp) inp.focus({ preventScroll: true });
+      return;
+    }
+    if (act === 'cancelmini') { quickEdit = null; renderResult(); return; }
     const s = state.result.stops[+li.dataset.i]; if (!s) return;
+    if (act === 'saveveh' || act === 'saveauf') {
+      if (act === 'saveveh') {
+        const raw = ($('#quickVeh') && $('#quickVeh').value) || '';
+        if (!setVehicles(s, raw)) { toast('Bitte eine Zahl eingeben.'); return; }
+      } else {
+        setOrderNo(s, ($('#quickAuf') && $('#quickAuf').value) || '');
+        if (doneStamp(s.done)) { rememberDoneStop(s); saveDoneMemory(); }
+      }
+      quickEdit = null;
+      if (!drafting()) saveResult();
+      renderResult();
+      renderTours();
+      return;
+    }
     if (act === 'done') {
       const mem = memoryTime(s);
       s.done = mem || Date.now();
@@ -2818,6 +2889,7 @@ function normalizeStops(list) {
     const done = s.done != null && s.done !== '' && typeof s.done !== 'boolean' && Number.isFinite(+s.done) ? +s.done : null;
     const stop = {
       auftrag: txt(s.auftrag), kategorie: txt(s.kategorie), datum: txt(s.datum), kunde: txt(s.kunde),
+      fahrzeuge: s.fahrzeuge != null && s.fahrzeuge !== '' && Number.isFinite(+s.fahrzeuge) ? Math.max(0, Math.round(+s.fahrzeuge)) : undefined,
       plz: txt(s.plz), ort: txt(s.ort), strasse: txt(s.strasse), typ: txt(s.typ), betrag: txt(s.betrag),
       geo, onsite: s.onsite != null && s.onsite !== '' && Number.isFinite(+s.onsite) ? +s.onsite : null, done
     };
