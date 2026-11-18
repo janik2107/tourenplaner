@@ -147,6 +147,14 @@ html.sheet-open .bottom{visibility:hidden}
 .nb-eta b{font-size:26px}
 .nextbox .navs .btn{background:rgba(255,255,255,.18);color:#fff}
 .ordno{display:inline-block;background:#fff;color:#000;font-weight:800;font-size:14px;letter-spacing:.3px;padding:2px 8px;border-radius:7px;font-variant-numeric:tabular-nums}
+button.ordno{border:0;cursor:pointer;font:800 14px/1.2 var(--font)}
+.place-line{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;margin-top:2px}
+.place-line .k{font-size:17px;font-weight:650}
+.aufnr{appearance:none;background:none;border:0;color:var(--sub);font:600 16px var(--font);padding:0;cursor:pointer}
+.aufnr.empty{font-weight:500;opacity:.6}
+.mini-edit{display:flex;gap:8px;align-items:center;margin:6px 0;min-width:0}
+.mini-edit input{flex:1;min-width:0}
+.mini-edit .btn{flex:none}
 .nextbox .ordno{background:rgba(255,255,255,.95)}
 .ordline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0 2px}
 .ordline .cat{color:var(--sub);font-size:14px}
