@@ -1,6 +1,6 @@
 'use strict';
 /* Tourenplaner – statische PWA. OCR: tesseract.js, Geocoding: Nominatim, Routing: OSRM */
-const VERSION = 'tp-v30';
+const VERSION = 'tp-v31';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -98,6 +98,10 @@ function vehicleCount(s) {
   if (s.fahrzeuge != null && s.fahrzeuge !== '' && Number.isFinite(+s.fahrzeuge) && +s.fahrzeuge >= 0) return Math.min(999, Math.round(+s.fahrzeuge));
   if (isVehicleAuftrag(s)) return +String(s.auftrag).trim();
   return null;
+}
+function vehicleShown(s) {
+  const n = vehicleCount(s);
+  return n == null ? 0 : n;
 }
 function orderNo(s) {
   if (!s) return '';
@@ -1292,7 +1296,7 @@ function routeSheet(res) {
     const leg = (res.legs && res.legs[i]) || { dur: 0, dist: 0 };
     const ord = [];
     const vehN = vehicleCount(s);
-    if (vehN != null) ord.push(vehN + ' Fahrzeuge');
+    ord.push(vehicleShown(s) + ' Fahrzeuge');
     if (orderNo(s)) ord.push(orderNo(s));
     else if (!vehN && s.auftrag) ord.push(s.auftrag);
     if (s.kategorie && !/fahrzeug/i.test(s.kategorie)) ord.push(s.kategorie);
@@ -1830,7 +1834,7 @@ function stopEditForm(s) {
     <input class="full" name="strasse" placeholder="Straße und Hausnr." value="${esc(s.strasse)}">
     <input name="plz" placeholder="PLZ" inputmode="numeric" value="${esc(s.plz)}">
     <input name="ort" placeholder="Ort" value="${esc(s.ort)}">
-    <input name="fahrzeuge" inputmode="numeric" placeholder="Fahrzeuge" value="${vehicleCount(s) != null ? vehicleCount(s) : ''}">
+    <input name="fahrzeuge" inputmode="numeric" placeholder="0" value="${vehicleCount(s) != null ? vehicleCount(s) : ''}">
     <input name="auftrag" placeholder="Auftragsnummer" value="${esc(orderNo(s))}">
     <input name="kategorie" placeholder="Kategorie" value="${esc(s.kategorie)}">
     <input class="full" name="coords" inputmode="decimal" placeholder="Koordinaten optional, z. B. 51.0504, 13.7373" value="">
@@ -2308,7 +2312,7 @@ function renderResultInner() {
     const s = res.stops[S.next], r = S.rows[S.next], p = pts[S.next + 1];
     const nextVeh = vehicleCount(s);
     const nextNo = orderNo(s);
-    $('#nextBox').innerHTML = `<div class="nb-l">Nächster Stopp</div><div class="nb-t">${nextVeh != null ? `<span class="ordno">${nextVeh} Fahrzeuge</span> ` : ''}${esc(s.kunde || addrText(s))}${nextNo ? ` <span class="aufnr">${esc(nextNo)}</span>` : ''}</div>
+    $('#nextBox').innerHTML = `<div class="nb-l">Nächster Stopp</div><div class="nb-t"><span class="ordno${nextVeh == null ? ' zero' : ''}">${vehicleShown(s)} Fahrzeuge</span> ${esc(s.kunde || addrText(s))}${nextNo ? ` <span class="aufnr">${esc(nextNo)}</span>` : ''}</div>
       <div class="nb-eta">Ankunft ca. <b>${hhmm(r.arr)}</b></div>
       <div class="navs"><a class="btn small gmaps" target="_blank" rel="noopener" href="${esc(googleStop(p))}">Google</a><a class="btn small amaps" target="_blank" rel="noopener" href="${esc(appleStop(p))}">Apple Karten</a></div>`;
     $('#nextBox').hidden = false;
@@ -2350,8 +2354,8 @@ function renderResultInner() {
       <div class="swipe-bg" aria-hidden="true"><span class="swipe-hint edit">Bearbeiten</span><span class="swipe-hint remove">Entfernen</span></div>
       <div class="swipe-face"><div class="tl-row">${rail(dot(r.done ? 'done' : (isNext ? 'next' : ''), r.done ? '✓' : String(i + 1)))}<div class="tl-card">
       ${eta}
-      <div class="ordline">${quickEdit === 'veh|' + i ? '' : (vehicleCount(s) != null ? `<button type="button" class="ordno veh" data-act="editveh">${vehicleCount(s)} Fahrzeuge</button>` : '')}${s.kategorie && !/fahrzeug/i.test(s.kategorie) ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}${s.geo && pointInArea(s.geo.lat, s.geo.lon) ? '<span class="tag gebiet">Gebiet</span>' : ''}</div>
-      ${editing ? stopEditForm(s) : `${quickEdit === 'veh|' + i ? `<div class="mini-edit"><input id="quickVeh" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="done" value="${vehicleCount(s) != null ? vehicleCount(s) : ''}"><button type="button" class="btn small" data-act="saveveh">Übernehmen</button><button type="button" class="btn small secondary" data-act="cancelmini">Abbrechen</button></div>` : ''}${quickEdit === 'auf|' + i ? `<div class="mini-edit"><input id="quickAuf" autocomplete="off" enterkeyhint="done" placeholder="Auftragsnummer" value="${esc(orderNo(s))}"><button type="button" class="btn small" data-act="saveauf">Übernehmen</button><button type="button" class="btn small secondary" data-act="cancelmini">Abbrechen</button></div>` : `<div class="place-line">${s.kunde || s.ort ? `<span class="k">${esc(s.kunde || s.ort)}</span>` : ''}${(s.kunde || s.ort) && orderNo(s) ? '<span class="aufnr">·</span>' : ''}${orderNo(s) ? `<button type="button" class="aufnr" data-act="editauf">${esc(orderNo(s))}</button>` : `<button type="button" class="aufnr empty" data-act="editauf">Nr.</button>`}</div>`}
+      <div class="ordline">${quickEdit === 'veh|' + i ? '' : `<button type="button" class="ordno veh${vehicleCount(s) == null ? ' zero' : ''}" data-act="editveh">${vehicleShown(s)} Fahrzeuge</button>`}${s.kategorie && !/fahrzeug/i.test(s.kategorie) ? `<span class="cat">${esc(s.kategorie)}</span>` : ''}${s.typ && /termin/i.test(s.typ) ? `<span class="tag termin">${esc(s.typ)}</span>` : ''}${s.geo && pointInArea(s.geo.lat, s.geo.lon) ? '<span class="tag gebiet">Gebiet</span>' : ''}</div>
+      ${editing ? stopEditForm(s) : `${quickEdit === 'veh|' + i ? `<div class="mini-edit"><input id="quickVeh" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="done" placeholder="0" value="${vehicleCount(s) != null ? vehicleCount(s) : ''}"><button type="button" class="btn small" data-act="saveveh">Übernehmen</button><button type="button" class="btn small secondary" data-act="cancelmini">Abbrechen</button></div>` : ''}${quickEdit === 'auf|' + i ? `<div class="mini-edit"><input id="quickAuf" autocomplete="off" enterkeyhint="done" placeholder="Auftragsnummer" value="${esc(orderNo(s))}"><button type="button" class="btn small" data-act="saveauf">Übernehmen</button><button type="button" class="btn small secondary" data-act="cancelmini">Abbrechen</button></div>` : `<div class="place-line">${s.kunde || s.ort ? `<span class="k">${esc(s.kunde || s.ort)}</span>` : ''}${(s.kunde || s.ort) && orderNo(s) ? '<span class="aufnr">·</span>' : ''}${orderNo(s) ? `<button type="button" class="aufnr" data-act="editauf">${esc(orderNo(s))}</button>` : `<button type="button" class="aufnr empty" data-act="editauf">Nr.</button>`}</div>`}
       <div class="a">${esc(addrText(s)) || '<i>keine Adresse</i>'}</div>`}
       ${noteHtml(s, 'route|' + i)}
       ${r.done ? '' : hoursHtml(s, r, res)}
